@@ -131,19 +131,23 @@ class SqlResult(TypedDict):
 # ---------------------------------------------------------------- helpers
 
 
+DEFAULT_SINCE_DAYS = 7
+
+
 @dataclass(frozen=True, slots=True)
 class Filters:
     """Which battles to analyse.
 
     battle_types: only these types (e.g. ("pathOfLegend",)); default = everything competitive.
-    since_days: only battles from the last N days.
+    since_days: only battles from the last N days (default 7: the meta shifts with balance
+      changes, and ~93% of crawled battles are this recent anyway). 0 = all time.
     deck_selection: 'collection' (normal decks) by default; None to include draft/special modes.
     min_trophies: subject deck's starting trophies >= N. Ladder (`trail`) uses trophies; Path of
       Legend reports its own rating (~2000s) in the same field, so filter battle_types too.
     """
 
     battle_types: tuple[str, ...] | None = None
-    since_days: int | None = None
+    since_days: int = DEFAULT_SINCE_DAYS
     deck_selection: str | None = "collection"
     min_trophies: int | None = None
 
@@ -152,7 +156,8 @@ class Filters:
         cls, battle_types: Sequence[str] | None = None, since_days: int | None = None
     ) -> Filters:
         return cls(
-            battle_types=tuple(battle_types) if battle_types else None, since_days=since_days
+            battle_types=tuple(battle_types) if battle_types else None,
+            since_days=DEFAULT_SINCE_DAYS if since_days is None else since_days,
         )
 
 
@@ -656,7 +661,7 @@ class Analyzer:
             for r in battles.iter_rows(named=True)
         ]
         my_decks = (
-            self.decks(Filters(deck_selection=None))
+            self.decks(Filters(deck_selection=None, since_days=0))  # your whole history
             .filter(pl.col("player_tag") == tag)
             .group_by("deck_key")
             .agg(games=pl.len(), wins=pl.col("score").sum(), cards=pl.col("cards").first())

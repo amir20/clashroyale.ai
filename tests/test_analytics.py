@@ -1,8 +1,11 @@
 import sqlite3
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
-from conftest import HOG, ME, PEKKA
+from conftest import HOG, ME, PEKKA, battle
 
+from crai import db
 from crai.analytics import Analyzer, CardNotFound, Filters
 
 
@@ -95,3 +98,13 @@ def test_snapshot_sql(analyzer: Analyzer) -> None:
     assert joined.row(0) == ("Fireball", 400)
     assert set(analyzer.snapshot_schema()) == {"decks", "cards"}
     assert "CREATE TABLE battles" in (analyzer.table_sql("battles") or "")
+
+
+def test_default_window_is_last_7_days(analyzer: Analyzer, db_path: Path) -> None:
+    old = battle(datetime.now(UTC) - timedelta(days=10), "#2P", "#9Q", a_wins=True)
+    with db.session(db_path) as conn:
+        assert db.ingest_battle(conn, old)
+    assert analyzer.decks().height == 400  # default: last 7 days, the old battle is excluded
+    assert analyzer.decks(Filters(since_days=0)).height == 402  # 0 = all time
+    assert Filters.of(None, None).since_days == 7
+    assert Filters.of(None, 0).since_days == 0

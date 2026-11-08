@@ -94,6 +94,7 @@ Limits and rules:
 - Requests are spread across all your API keys (see [Setup](#setup)).
 - If one player's request fails (a timeout or 500) or their data is malformed, that player is skipped and retried next run. A **403** (bad token or IP) stops the crawl immediately.
 - Only one crawl can run at a time (`data/.crawl.lock`).
+- All SQLite writes happen on one dedicated thread, so fetching continues while it commits.
 
 ### 2. Store: write everything into SQLite
 
@@ -133,7 +134,7 @@ Every question, from the CLI or MCP, goes through the same `Analyzer` (`src/crai
 
 1. Check that the snapshot is current (under 1 ms), syncing first if it's behind.
 2. Load the snapshot from memory if it's cached, otherwise from Parquet (~30 ms). Then mark which decks belong to seed players (`is_top`). This is looked up fresh from `players` because seed status can change after a battle is stored.
-3. Apply your filters: battle types, last N days, top players only. The defaults keep normal (`collection`) decks and drop friendly, clanmate and boat battles.
+3. Apply your filters: battle types, last N days, top players only. The defaults cover the **last 7 days** (the current meta; `--since 0` / `since_days=0` means all time), keep normal (`collection`) decks, and drop friendly, clanmate and boat battles.
 4. Compute the answer in polars (10–50 ms).
 
 Per-player questions (`player_profile`, `player_cards`) and `run_sql` read SQLite directly, because they need details the snapshot doesn't have. `crai sql --snapshot` / `run_snapshot_sql` run SQL over the snapshot itself (tables `decks` and `cards`) for fast ad-hoc aggregates.

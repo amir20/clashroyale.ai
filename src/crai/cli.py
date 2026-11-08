@@ -39,7 +39,9 @@ _state = {"json": False}
 TypesOpt = Annotated[
     list[str] | None, typer.Option("--type", help="Battle type(s), e.g. pathOfLegend, trail")
 ]
-SinceOpt = Annotated[int | None, typer.Option(help="Only battles from the last N days")]
+SinceOpt = Annotated[
+    int | None, typer.Option(help="Only battles from the last N days (default 7; 0 = all time)")
+]
 TopOpt = Annotated[bool, typer.Option("--top-only", help="Only decks played by seed (top) players")]
 TagArg = Annotated[str | None, typer.Argument(help="Player tag; defaults to CR_MY_TAG")]
 

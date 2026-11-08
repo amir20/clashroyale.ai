@@ -31,7 +31,8 @@ HOG = 26000021
 PEKKA = 26000004
 CYCLE = (HOG, 28000011, 28000000, 26000010, 26000030, 26000014, 27000000, 26000000)
 BEATDOWN = (PEKKA, 26000055, 28000011, 28000000, 26000010, 26000012, 26000014, 26000000)
-START = datetime(2026, 11, 1, tzinfo=UTC)
+# Recent, so the default 7-day window includes the fixture battles whatever today's date is.
+START = (datetime.now(UTC) - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
 ME = "#2P"
 
 

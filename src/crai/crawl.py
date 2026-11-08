@@ -5,12 +5,17 @@ but their already-stored opponents are still used to expand the frontier.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import sqlite3
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from functools import partial
+from typing import Any, Protocol
 
 from . import db
 from .api import ClashAPIError, ClashClient, normalize_tag
@@ -58,6 +63,67 @@ class CrawlProgress(Protocol):
     ) -> None: ...
 
 
+class _Writer:
+    """Runs every SQLite call on one dedicated thread, in submission order.
+
+    The event loop keeps fetching while the thread writes (SQLite releases the GIL while it
+    executes statements), so fetch time and write time overlap instead of adding up. At most
+    `max_pending` writes queue up before fetching waits (bounded memory).
+    """
+
+    def __init__(self, max_pending: int = 256) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="crai-sqlite")
+        self._pending: deque[asyncio.Future[Any]] = deque()
+        self._max = max_pending
+
+    def submit[T](self, fn: Callable[..., T], *args: Any) -> asyncio.Future[T]:
+        fut = asyncio.get_running_loop().run_in_executor(self._pool, fn, *args)
+        self._pending.append(fut)
+        return fut
+
+    async def call[T](self, fn: Callable[..., T], *args: Any) -> T:
+        return await self.submit(fn, *args)
+
+    def _reap(self) -> None:
+        while self._pending and self._pending[0].done():
+            self._pending.popleft().result()  # re-raises a failed write (DB errors are fatal)
+
+    async def backpressure(self) -> None:
+        self._reap()
+        while len(self._pending) > self._max:
+            await self._pending.popleft()
+
+    async def drain(self) -> None:
+        while self._pending:
+            await self._pending.popleft()
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True)
+
+
+def _ingest(
+    conn: sqlite3.Connection, r: FetchResult, is_seed: bool, seed_rank: int | None, depth: int
+) -> int | None:
+    """Write one player (writer thread). Returns new battles, or None for a malformed payload.
+
+    A malformed payload shouldn't end a 10k-player crawl: roll back just that player's writes and
+    move on. Database errors (locked, full) still raise and stop the crawl.
+    """
+    conn.execute("SAVEPOINT player")
+    try:
+        if r.profile:
+            db.upsert_player(conn, r.profile, is_seed=is_seed, seed_rank=seed_rank, depth=depth)
+        new = db.ingest_battlelog(conn, r.battles)
+        db.mark_battlelog_fetched(conn, r.tag)
+    except KeyError, TypeError, AttributeError, ValueError:
+        conn.execute("ROLLBACK TO player")
+        conn.execute("RELEASE player")
+        log.warning("skipping %s: malformed payload", r.tag, exc_info=True)
+        return None
+    conn.execute("RELEASE player")
+    return new
+
+
 def _is_fresh(conn: sqlite3.Connection, tag: str, cutoff: str) -> bool:
     row = conn.execute("SELECT battlelog_fetched_at FROM players WHERE tag = ?", (tag,)).fetchone()
     return bool(row and row[0] and row[0] >= cutoff)
@@ -91,11 +157,8 @@ async def crawl(
     progress: CrawlProgress | None = None,
 ) -> CrawlStats:
     stats = CrawlStats()
-    run_id = conn.execute(
-        "INSERT INTO crawl_runs (started_at, params, status) VALUES (?, ?, 'running')",
-        (db.now_iso(), json.dumps(asdict(params))),
-    ).lastrowid
-    conn.commit()
+    writer = _Writer()
+    run_id = await writer.call(_start_run, conn, params)
 
     seeds: list[str] = []
     seed_rank: dict[str, int] = {}
@@ -122,10 +185,11 @@ async def crawl(
         for depth in range(params.depth + 1):
             if not frontier:
                 break
+            fresh = await writer.call(_fresh_set, conn, frontier, cutoff)
             to_fetch: list[str] = []
             expand_from_db: list[str] = []
             for t in frontier:
-                if _is_fresh(conn, t, cutoff):
+                if t in fresh:
                     expand_from_db.append(t)
                 elif budget > 0:
                     to_fetch.append(t)
@@ -142,39 +206,11 @@ async def crawl(
             )
 
             discovered: list[str] = []
-            tasks = [asyncio.create_task(_fetch(client, t)) for t in to_fetch]
-            for done, fut in enumerate(asyncio.as_completed(tasks), start=1):
-                r = await fut
-                if r.error:
-                    stats.players_failed += 1
-                    log.warning("skipping %s: %s", r.tag, r.error)
-                elif r.profile is None and not r.battles:
-                    stats.players_missing += 1
-                else:
-                    # One player's malformed payload shouldn't end a 10k-player crawl: roll back
-                    # just that player's writes and move on. DB errors (locked, full) still raise.
-                    conn.execute("SAVEPOINT player")
-                    try:
-                        if r.profile:
-                            db.upsert_player(
-                                conn,
-                                r.profile,
-                                is_seed=r.tag in seed_set,
-                                seed_rank=seed_rank.get(r.tag),
-                                depth=depth,
-                            )
-                        new = db.ingest_battlelog(conn, r.battles)
-                        db.mark_battlelog_fetched(conn, r.tag)
-                    except KeyError, TypeError, AttributeError, ValueError:
-                        conn.execute("ROLLBACK TO player")
-                        conn.execute("RELEASE player")
-                        stats.players_failed += 1
-                        log.warning("skipping %s: malformed payload", r.tag, exc_info=True)
-                    else:
-                        conn.execute("RELEASE player")
-                        stats.battles_new += new
-                        stats.players_fetched += 1
-                        discovered += _discovered(r, expand_friendly=params.expand_friendly)
+            done = 0
+
+            def finished(depth: int = depth, total: int = len(to_fetch)) -> None:
+                nonlocal done
+                done += 1
                 if progress:
                     progress.player_done(
                         done,
@@ -183,46 +219,95 @@ async def crawl(
                         client.throttled,
                         stats.players_failed,
                     )
-                if done % 50 == 0:
-                    conn.commit()
-                    (log.debug if progress else log.info)(
+                if done % 500 == 0 and not progress:
+                    log.info(
                         "  depth %d: %d/%d players, %d new battles, %d requests, %d throttled",
                         depth,
                         done,
-                        len(to_fetch),
+                        total,
                         stats.battles_new,
                         client.requests,
                         client.throttled,
                     )
-            conn.commit()
+
+            def ingested(r: FetchResult, found: list[str], fut: asyncio.Future[int | None]) -> None:
+                # Runs on the event loop when the writer thread finishes this player.
+                if fut.cancelled() or fut.exception() is not None:
+                    return  # surfaced by the writer (fatal)
+                if (new := fut.result()) is None:
+                    stats.players_failed += 1
+                else:
+                    stats.battles_new += new
+                    stats.players_fetched += 1
+                    found.extend(_discovered(r, expand_friendly=params.expand_friendly))
+                finished()
+
+            tasks = [asyncio.create_task(_fetch(client, t)) for t in to_fetch]
+            submitted = 0
+            for fut in asyncio.as_completed(tasks):
+                r = await fut
+                if r.error:
+                    stats.players_failed += 1
+                    log.warning("skipping %s: %s", r.tag, r.error)
+                    finished()
+                elif r.profile is None and not r.battles:
+                    stats.players_missing += 1
+                    finished()
+                else:
+                    w = writer.submit(
+                        _ingest, conn, r, r.tag in seed_set, seed_rank.get(r.tag), depth
+                    )
+                    w.add_done_callback(partial(ingested, r, discovered))
+                    submitted += 1
+                    if submitted % 50 == 0:
+                        writer.submit(conn.commit)
+                    await writer.backpressure()
+            writer.submit(conn.commit)
+            await writer.drain()
             stats.per_depth[depth] = len(to_fetch)
             if depth == params.depth:
                 break
             for t in expand_from_db:
-                discovered += db.opponents_of(conn, t)
+                discovered += await writer.call(db.opponents_of, conn, t)
             frontier = [t for t in dict.fromkeys(discovered) if t not in seen]
             seen.update(frontier)
         status = "ok"
     finally:
-        # Cancel in-flight requests so an error/Ctrl-C exits cleanly.
+        # Cancel in-flight requests so an error/Ctrl-C exits cleanly, then let queued writes land.
         pending = [t for t in tasks if not t.done()]
         for t in pending:
             t.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        conn.execute(
-            """UPDATE crawl_runs SET finished_at=?, players_fetched=?, battles_new=?, requests=?,
-                 status=? WHERE id=?""",
-            (
-                db.now_iso(),
-                stats.players_fetched,
-                stats.battles_new,
-                client.requests,
-                status,
-                run_id,
-            ),
-        )
-        conn.commit()
+        with contextlib.suppress(Exception):
+            await writer.drain()
+        await writer.call(_finish_run, conn, run_id, stats, client.requests, status)
+        writer.close()
     return stats
+
+
+def _start_run(conn: sqlite3.Connection, params: CrawlParams) -> int:
+    cur = conn.execute(
+        "INSERT INTO crawl_runs (started_at, params, status) VALUES (?, ?, 'running')",
+        (db.now_iso(), json.dumps(asdict(params))),
+    )
+    conn.commit()
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
+def _finish_run(
+    conn: sqlite3.Connection, run_id: int, stats: CrawlStats, requests: int, status: str
+) -> None:
+    conn.execute(
+        """UPDATE crawl_runs SET finished_at=?, players_fetched=?, battles_new=?, requests=?,
+             status=? WHERE id=?""",
+        (db.now_iso(), stats.players_fetched, stats.battles_new, requests, status, run_id),
+    )
+    conn.commit()
+
+
+def _fresh_set(conn: sqlite3.Connection, tags: list[str], cutoff: str) -> set[str]:
+    return {t for t in tags if _is_fresh(conn, t, cutoff)}
 
 
 async def sync_cards(client: ClashClient, conn: sqlite3.Connection) -> int:

@@ -46,6 +46,8 @@ everyone they played against (two hops out). Use it to answer deck-building ques
   prefer it for ranking. `margin` is the 95% margin of error on win_rate: a difference smaller
   than the margin may be noise, so say so instead of recommending on it. Always mention games
   (and players, when given: few players = one person's skill may drive the result).
+- Stats cover the last 7 days by default (the current meta); pass since_days=0 for all time
+  or a larger window when a sample is too small. Say which window you used.
 - top_only=true restricts to decks played by seed (top-ranked) players: closer to "the meta".
 - Compute counts and rates with tools/run_sql rather than estimating them from raw rows.
 - For deck/card aggregates the tools don't cover, use run_snapshot_sql (fast, polars SQL over

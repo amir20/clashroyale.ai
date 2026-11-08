@@ -30,7 +30,9 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
         conn.execute("PRAGMA query_only = 1")
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, timeout=60)  # wait for other writers
+        # check_same_thread=False: the crawler hands this connection to one writer thread; every
+        # use is serialized (writer thread, or the loop while the writer is idle).
+        conn = sqlite3.connect(path, timeout=60, check_same_thread=False)
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         # SQLite never shrinks the WAL file by default; cap what it keeps after a checkpoint.
