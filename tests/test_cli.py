@@ -7,6 +7,13 @@ from typer.testing import CliRunner
 
 from crai.cli import app
 
+
+@pytest.fixture(autouse=True)
+def isolated_db(monkeypatch: pytest.MonkeyPatch, db_path: Path) -> None:
+    """Never touch the real data/clash.db from CLI tests."""
+    monkeypatch.setenv("CR_DB_PATH", str(db_path))
+
+
 group = typer.main.get_command(app)
 assert isinstance(group, TyperGroup)  # typer 0.28 vendors click
 COMMANDS = sorted(group.commands)

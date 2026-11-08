@@ -8,9 +8,11 @@ import asyncio
 import fcntl
 import json
 import logging
+import sqlite3
 import sys
 import time
 from collections.abc import Callable
+from contextlib import closing
 from typing import Annotated, Any
 
 import typer
@@ -20,11 +22,13 @@ lazy import polars as pl
 lazy from rich.logging import RichHandler
 
 from .config import Settings, get_settings
+from .schema import is_legacy
 lazy from . import db, snapshot, ui
 lazy from .analytics import Analyzer, CardSort, DeckSort, Filters, PairSort
 lazy from .api import ClashClient
 lazy from .crawl import CrawlParams, crawl, sync_cards
 lazy from .mcp_server import run as run_mcp
+lazy from .upgrade import upgrade
 
 app = typer.Typer(no_args_is_help=True, help="Clash Royale crawler, analytics and MCP server.")
 log = logging.getLogger("crai")
@@ -68,6 +72,7 @@ def _my_tag(tag: str | None) -> str:
 
 @app.callback()
 def _main(
+    ctx: typer.Context,
     verbose: Annotated[bool, typer.Option("-v", "--verbose", help="Debug logging")] = False,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable JSON output")] = False,
 ) -> None:
@@ -83,6 +88,23 @@ def _main(
         handlers=[handler],
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    if ctx.invoked_subcommand not in {"upgrade-db", "mcp"}:
+        _refuse_legacy()
+
+
+def _refuse_legacy() -> None:
+    path = get_settings().db_path
+    if not path.exists():
+        return
+    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+        legacy = is_legacy(conn)
+    if legacy:
+        ui.console.print(
+            f"[yellow]{path} uses the old (v2) layout, which makes crawls slow.[/]\n"
+            "Convert it once with [bold]uv run crai upgrade-db[/] (your data is kept, and the "
+            "original is saved as a backup)."
+        )
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------- data collection
@@ -147,6 +169,7 @@ def crawl_cmd(
                         stats = await crawl(c, conn, params, progress)
                 else:
                     stats = await crawl(c, conn, params)
+                db.checkpoint(conn)  # fold the WAL back in so it doesn't grow across crawls
             summary = {k: getattr(stats, k) for k in stats.__slots__}
             return summary | {
                 "requests": c.requests,
@@ -178,6 +201,53 @@ class _nullcontext:
 
     def __exit__(self, *exc: object) -> None:
         return None
+
+
+@app.command("upgrade-db")
+def upgrade_db() -> None:
+    """Convert an old (v2) database to the fast v3 layout. Keeps the original as a backup."""
+    s = get_settings()
+    with (s.db_path.parent / ".crawl.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError, PermissionError:
+            typer.echo("A crawl is running; stop it before upgrading.", err=True)
+            raise typer.Exit(1) from None
+        started = time.monotonic()
+        with ui.console.status("starting…") as status:
+            report = upgrade(s.db_path, step=lambda msg: status.update(f"{msg}…"))
+        with ui.console.status("rebuilding analytics snapshot…"):
+            snap_rows = snapshot.sync(s.db_path)
+    total = time.monotonic() - started
+    gb = 1e9
+    _emit(
+        {
+            "counts": report.counts,
+            "seconds": report.seconds,
+            "old_bytes": report.old_bytes,
+            "new_bytes": report.new_bytes,
+            "backup": str(report.backup_path),
+        },
+        lambda: ui.show(
+            ui.kv(
+                {
+                    "before": f"{report.old_bytes / gb:.2f} GB",
+                    "after": f"{report.new_bytes / gb:.2f} GB",
+                    "total time": f"{total / 60:.1f} min",
+                    "snapshot rows": snap_rows,
+                    "backup": str(report.backup_path),
+                },
+                "database upgraded to v3",
+                columns=1,
+            ),
+            ui.table(
+                [{"table": k, "rows": v} for k, v in report.counts.items()], "rows (verified)"
+            ),
+            ui.table(
+                [{"step": k, "seconds": round(v, 1)} for k, v in report.seconds.items()], "timing"
+            ),
+        ),
+    )
 
 
 @app.command("snapshot")

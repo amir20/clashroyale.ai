@@ -1,9 +1,9 @@
-"""SQLite schema, migrations and idempotent ingest functions.
+"""SQLite connections and idempotent ingest functions (schema lives in `schema.py`).
 
-Every write is an upsert or INSERT OR IGNORE, so re-running a crawl only adds new data.
+Every write is an upsert, INSERT OR IGNORE, or guarded by the dedup check, so re-running a crawl
+only adds new data.
 """
 
-import hashlib
 import json
 import sqlite3
 from collections.abc import Generator, Iterable, Sequence
@@ -11,143 +11,12 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import snapshot
 from .models import ApiBattle, ApiCard, ApiPlayer, BattlePlayer, CardList
+from .schema import SCHEMA, SCHEMA_VERSION, LegacySchemaError, is_legacy
 
 # The same battle appears in both players' logs, sometimes with timestamps a second apart.
 # Battles between the same participants within this window are treated as one.
 DEDUP_WINDOW_SECONDS = 10
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS cards (
-    id                  INTEGER PRIMARY KEY,
-    name                TEXT NOT NULL,
-    rarity              TEXT,
-    elixir              INTEGER,
-    max_level           INTEGER,
-    max_evolution_level INTEGER,
-    is_support          INTEGER NOT NULL DEFAULT 0,  -- tower troops
-    icon_url            TEXT,
-    evo_icon_url        TEXT,
-    updated_at          TEXT
-);
-
-CREATE TABLE IF NOT EXISTS players (
-    tag                  TEXT PRIMARY KEY,
-    name                 TEXT,
-    exp_level            INTEGER,
-    trophies             INTEGER,
-    best_trophies        INTEGER,
-    wins                 INTEGER,
-    losses               INTEGER,
-    battle_count         INTEGER,
-    three_crown_wins     INTEGER,
-    clan_tag             TEXT,
-    clan_name            TEXT,
-    arena                TEXT,
-    pol_league           INTEGER,   -- current Path of Legend season
-    pol_trophies         INTEGER,
-    pol_rank             INTEGER,
-    best_pol_league      INTEGER,
-    best_pol_rank        INTEGER,
-    is_seed              INTEGER NOT NULL DEFAULT 0,  -- 1 = top-ranked or explicitly requested
-    seed_rank            INTEGER,
-    crawl_depth          INTEGER,
-    first_seen_at        TEXT,
-    profile_fetched_at   TEXT,
-    battlelog_fetched_at TEXT
-);
-
--- Seed lookups run before every analytics question; keep them off a full scan.
-CREATE INDEX IF NOT EXISTS players_seed ON players(tag) WHERE is_seed = 1;
-
--- Card collection (levels) as reported by the player profile.
-CREATE TABLE IF NOT EXISTS player_cards (
-    tag             TEXT NOT NULL,
-    card_id         INTEGER NOT NULL,
-    level           INTEGER,
-    max_level       INTEGER,
-    star_level      INTEGER,
-    evolution_level INTEGER,
-    count           INTEGER,
-    PRIMARY KEY (tag, card_id)
-);
-
-CREATE TABLE IF NOT EXISTS player_current_deck (
-    tag             TEXT NOT NULL,
-    slot            INTEGER NOT NULL,
-    card_id         INTEGER NOT NULL,
-    level           INTEGER,
-    max_level       INTEGER,
-    evolution_level INTEGER,
-    PRIMARY KEY (tag, slot)
-);
-
-CREATE TABLE IF NOT EXISTS battles (
-    id                   TEXT PRIMARY KEY,  -- sha1(battle_time + sorted participant tags)
-    battle_time          TEXT NOT NULL,     -- ISO-8601 UTC
-    participants_key     TEXT,              -- sorted participant tags joined by '|'
-    battle_type          TEXT,              -- pathOfLegend, trail (ladder), riverRacePvP, ...
-    game_mode_id         INTEGER,
-    game_mode            TEXT,
-    arena                TEXT,
-    deck_selection       TEXT,              -- collection, draft, ...
-    is_ladder_tournament INTEGER,
-    is_hosted_match      INTEGER,
-    league_number        INTEGER,
-    team_size            INTEGER,           -- 1 = 1v1, 2 = 2v2
-    ingested_at          TEXT
-);
-CREATE INDEX IF NOT EXISTS battles_time ON battles(battle_time);
-CREATE INDEX IF NOT EXISTS battles_type ON battles(battle_type);
-
-CREATE TABLE IF NOT EXISTS battle_participants (
-    battle_id          TEXT NOT NULL,
-    player_tag         TEXT NOT NULL,
-    side               INTEGER NOT NULL,  -- 0/1; teammates share a side
-    name               TEXT,
-    clan_tag           TEXT,
-    starting_trophies  INTEGER,
-    trophy_change      INTEGER,
-    crowns             INTEGER,
-    opponent_crowns    INTEGER,
-    result             TEXT,              -- win / loss / draw
-    king_tower_hp      INTEGER,
-    princess_towers_hp TEXT,              -- JSON list
-    elixir_leaked      REAL,
-    deck_key           TEXT,              -- sorted card ids joined by '-' (8-card decks only)
-    avg_elixir         REAL,
-    PRIMARY KEY (battle_id, player_tag)
-);
-CREATE INDEX IF NOT EXISTS bp_tag ON battle_participants(player_tag);
-CREATE INDEX IF NOT EXISTS bp_deck ON battle_participants(deck_key);
-
-CREATE TABLE IF NOT EXISTS participant_cards (
-    battle_id       TEXT NOT NULL,
-    player_tag      TEXT NOT NULL,
-    card_id         INTEGER NOT NULL,
-    slot            INTEGER,           -- position in deck; evolution slots come first
-    kind            TEXT NOT NULL,     -- 'deck' or 'support' (tower troop)
-    level           INTEGER,
-    max_level       INTEGER,
-    evolution_level INTEGER,
-    PRIMARY KEY (battle_id, player_tag, card_id)
-);
-CREATE INDEX IF NOT EXISTS pc_card ON participant_cards(card_id);
-
-CREATE TABLE IF NOT EXISTS crawl_runs (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at      TEXT,
-    finished_at     TEXT,
-    params          TEXT,
-    players_fetched INTEGER,
-    battles_new     INTEGER,
-    requests        INTEGER,
-    status          TEXT
-);
-"""
-
-SCHEMA_VERSION = 2
 
 
 def now_iso() -> str:
@@ -164,11 +33,27 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
         conn = sqlite3.connect(path, timeout=60)  # wait for other writers
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
+        # SQLite never shrinks the WAL file by default; cap what it keeps after a checkpoint.
+        conn.execute("PRAGMA journal_size_limit = 67108864")  # 64 MB
+    # Bigger page cache + memory-mapped reads: fewer disk round trips on a multi-GB file.
+    conn.execute("PRAGMA cache_size = -262144")  # 256 MB
+    conn.execute("PRAGMA mmap_size = 1073741824")  # 1 GB
+    conn.execute("PRAGMA temp_store = MEMORY")
+    if is_legacy(conn):
+        conn.close()
+        raise LegacySchemaError(path)
+    if not read_only:
         conn.executescript(SCHEMA)
-        if migrate(conn):
-            snapshot.invalidate(path)  # it may hold rows the migration deleted
+        if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def checkpoint(conn: sqlite3.Connection) -> None:
+    """Fold the WAL back into the database and truncate it (e.g. at the end of a crawl)."""
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 @contextmanager
@@ -184,52 +69,6 @@ def session(path: Path | str, *, read_only: bool = False) -> Generator[sqlite3.C
             conn.commit()
     finally:
         conn.close()
-
-
-def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def migrate(conn: sqlite3.Connection) -> bool:
-    """Upgrade the schema in place. Returns True if any migration ran."""
-    version: int = conn.execute("PRAGMA user_version").fetchone()[0]
-    ran = version < SCHEMA_VERSION
-    if version < 2:
-        # v2: participants_key for timestamp-tolerant dedup; remove existing near-duplicates.
-        if "participants_key" not in _columns(conn, "battles"):
-            conn.execute("ALTER TABLE battles ADD COLUMN participants_key TEXT")
-        conn.execute(
-            """UPDATE battles SET participants_key = (
-                 SELECT group_concat(player_tag, '|') FROM (
-                   SELECT player_tag FROM battle_participants
-                   WHERE battle_id = battles.id ORDER BY player_tag))
-               WHERE participants_key IS NULL"""
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS battles_pkey ON battles(participants_key)")
-        dedupe_battles(conn)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
-    conn.execute("CREATE INDEX IF NOT EXISTS battles_pkey ON battles(participants_key)")
-    return ran
-
-
-def dedupe_battles(conn: sqlite3.Connection) -> int:
-    """Delete battles that duplicate an earlier one (same participants, within the window)."""
-    dupes = [
-        r[0]
-        for r in conn.execute(
-            """SELECT DISTINCT b2.id FROM battles b1
-               JOIN battles b2 ON b2.participants_key = b1.participants_key AND b2.id <> b1.id
-               WHERE (b1.battle_time < b2.battle_time
-                      OR (b1.battle_time = b2.battle_time AND b1.id < b2.id))
-                 AND unixepoch(b2.battle_time) - unixepoch(b1.battle_time) <= ?""",
-            (DEDUP_WINDOW_SECONDS,),
-        )
-    ]
-    for table, col in (("participant_cards", "battle_id"), ("battle_participants", "battle_id")):
-        conn.executemany(f"DELETE FROM {table} WHERE {col} = ?", [(d,) for d in dupes])
-    conn.executemany("DELETE FROM battles WHERE id = ?", [(d,) for d in dupes])
-    return len(dupes)
 
 
 def parse_battle_time(s: str) -> str:
@@ -411,10 +250,6 @@ def _tags(b: ApiBattle) -> list[str]:
     return sorted(p.get("tag", "?") for p in participants(b))
 
 
-def battle_id(b: ApiBattle) -> str:
-    return hashlib.sha1(f"{b.get('battleTime')}|{'|'.join(_tags(b))}".encode()).hexdigest()
-
-
 def _result(mine: int, theirs: int) -> str:
     return "win" if mine > theirs else "loss" if mine < theirs else "draw"
 
@@ -435,7 +270,6 @@ def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
     team, opp = (b.get("team") or []), (b.get("opponent") or [])
     if not team or not opp:
         return False
-    bid = battle_id(b)
     pkey = "|".join(_tags(b))
     btime = parse_battle_time(b.get("battleTime", ""))
     if _is_duplicate(conn, pkey, btime):
@@ -447,12 +281,11 @@ def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
         sides = [opp, team]
     game_mode = b.get("gameMode") or {}
     cur = conn.execute(
-        """INSERT OR IGNORE INTO battles (id, battle_time, participants_key, battle_type,
+        """INSERT INTO battles (battle_time, participants_key, battle_type,
                game_mode_id, game_mode, arena, deck_selection, is_ladder_tournament,
                is_hosted_match, league_number, team_size, ingested_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            bid,
             btime,
             pkey,
             b.get("type"),
@@ -467,9 +300,8 @@ def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
             now_iso(),
         ),
     )
-    if cur.rowcount == 0:
-        return False
-
+    bid = cur.lastrowid
+    assert bid is not None
     side_crowns = [max((p.get("crowns") or 0) for p in s) for s in sides]
     for side_idx, side in enumerate(sides):
         mine, theirs = side_crowns[side_idx], side_crowns[1 - side_idx]
@@ -481,7 +313,7 @@ def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
 
 def _ingest_participant(
     conn: sqlite3.Connection,
-    bid: str,
+    bid: int,
     side_idx: int,
     p: BattlePlayer,
     tag: str,

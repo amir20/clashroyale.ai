@@ -109,6 +109,8 @@ Every battle is written to `data/clash.db`:
 | `cards` | card | name, elixir, rarity, max level |
 | `crawl_runs` | crawl | parameters, counts, status |
 
+**Fast writes.** Battle IDs are sequential integers, and the big per-battle tables are clustered on `battle_id`, so new rows always land at the *end* of each index. Each commit touches a few adjacent pages instead of thousands of scattered ones; with v2's random SHA-1 IDs, commits took ~80% of crawl time. A database created before v3 has to be converted once with `uv run crai upgrade-db`, which keeps the original as `data/clash.v2-backup.db`.
+
 **Battles are stored once.** The same battle appears in both players' logs, sometimes with timestamps a second apart, so a battle with the same participants within 10 seconds counts as the same battle. Side 0 is always the player whose tag sorts first, so both copies look identical.
 
 **Writes are idempotent.** Battles are insert-or-ignore, and players are updated in place. Re-running a crawl never duplicates anything; it only adds new battles and refreshes profiles.

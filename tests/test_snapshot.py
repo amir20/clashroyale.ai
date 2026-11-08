@@ -50,15 +50,6 @@ def test_compaction(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert snapshot.read(db_path)[1].height == 404
 
 
-def test_migration_resets_snapshot(db_path: Path) -> None:
-    snapshot.sync(db_path)
-    with db.session(db_path) as conn:
-        conn.execute("PRAGMA user_version = 1")
-    db.connect(db_path).close()  # runs the migration again
-    assert not list(snapshot.snapshot_dir(db_path).glob("*.parquet"))
-    assert snapshot.sync(db_path) == 400
-
-
 def test_snapshot_matches_database(analyzer: Analyzer) -> None:
     d = analyzer.decks()
     assert d["score"].sum() == analyzer.scalar(

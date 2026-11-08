@@ -4,10 +4,14 @@ from pathlib import Path
 
 import pytest
 from conftest import ME, battles, flipped
+from legacy import make_legacy
 
 from crai import db
+from crai.analytics import Analyzer
 from crai.api import normalize_tag
 from crai.models import ApiPlayer
+from crai.schema import SCHEMA_VERSION, LegacySchemaError
+from crai.upgrade import upgrade
 
 
 def count(path: Path, table: str) -> int:
@@ -45,37 +49,67 @@ def test_canonical_sides(db_path: Path) -> None:
     assert sides == [(1,)]  # '#2P' sorts after '#22...', so it is always side 1
 
 
-def test_migration_v1_dedupes_existing_rows(tmp_path: Path) -> None:
-    """A v1 database (no participants_key, near-duplicate rows) is repaired on connect."""
-    path = tmp_path / "old.db"
-    conn = db.connect(path)
-    first = battles(3)
-    db.ingest_battlelog(conn, first)
-    # Simulate v1: inject a duplicate the old exact-timestamp ID scheme let through.
-    dup = flipped(first[0], shift_seconds=1)
-    conn.execute("UPDATE battles SET participants_key = NULL")
-    conn.execute("PRAGMA user_version = 1")
-    conn.execute(
-        "INSERT INTO battles (id, battle_time, team_size) VALUES (?, ?, 1)",
-        (db.battle_id(dup), db.parse_battle_time(dup["battleTime"])),
-    )
-    conn.execute(
-        """INSERT INTO battle_participants (battle_id, player_tag, side)
-           SELECT ?, player_tag, side FROM battle_participants WHERE battle_id = ?""",
-        (db.battle_id(dup), db.battle_id(first[0])),
-    )
-    conn.commit()
-    conn.close()
-    assert count(path, "battles") == 4
+def test_legacy_database_is_refused(db_path: Path, tmp_path: Path) -> None:
+    old = tmp_path / "old.db"
+    make_legacy(db_path, old)
+    with pytest.raises(LegacySchemaError, match="upgrade-db"):
+        db.connect(old)
+    with pytest.raises(LegacySchemaError):
+        db.connect(old, read_only=True)
 
-    db.connect(path).close()
-    assert count(path, "battles") == 3
-    with closing(sqlite3.connect(path)) as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
-        assert (
-            c.execute("SELECT count(*) FROM battles WHERE participants_key IS NULL").fetchone()[0]
-            == 0
-        )
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_upgrade_preserves_everything(db_path: Path, tmp_path: Path, version: int) -> None:
+    old = tmp_path / "old.db"
+    make_legacy(db_path, old, version=version)
+    if version == 1:  # add a near-duplicate (1 s apart), as v1 could contain
+        with closing(sqlite3.connect(old)) as c:
+            first = c.execute("SELECT * FROM battles ORDER BY rowid LIMIT 1").fetchone()
+            dup = "f" * 40
+            c.execute(
+                "INSERT INTO battles VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ', ?, '+1 second'),"
+                " ?,?,?,?,?,?,?,?,?,?,?)",
+                (dup, first[1], *first[2:]),
+            )
+            for t in ("battle_participants", "participant_cards"):
+                cols = [r[1] for r in c.execute(f"PRAGMA table_info({t})") if r[1] != "battle_id"]
+                c.execute(
+                    f"INSERT INTO {t} (battle_id, {', '.join(cols)})"
+                    f" SELECT ?, {', '.join(cols)} FROM {t} WHERE battle_id = ?",
+                    (dup, first[0]),
+                )
+            c.commit()
+    report = upgrade(old)
+    assert report.counts["battles"] == 200
+    assert report.counts == {
+        "battles": 200,
+        "battle_participants": 400,
+        "participant_cards": 3200,
+        "players": count(db_path, "players"),
+        "player_cards": count(db_path, "player_cards"),
+    }
+    assert report.backup_path.exists()
+    with db.session(old, read_only=True) as conn:  # opens: it's v3 now
+        ids = [r[0] for r in conn.execute("SELECT id FROM battles ORDER BY id")]
+        assert ids == list(range(1, 201))  # sequential integers, original order kept
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert Analyzer(old).decks().height == 400  # analytics works on the upgraded file
+
+
+def test_upgrade_refuses_v3_and_existing_backup(db_path: Path, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="already"):
+        upgrade(db_path)
+    old = tmp_path / "old.db"
+    make_legacy(db_path, old)
+    (tmp_path / "old.v2-backup.db").touch()
+    with pytest.raises(FileExistsError):
+        upgrade(old)
+
+
+def test_ingest_ids_are_sequential(db_path: Path) -> None:
+    with closing(sqlite3.connect(db_path)) as c:
+        ids = [r[0] for r in c.execute("SELECT id FROM battles ORDER BY rowid")]
+    assert ids == sorted(ids) == list(range(1, len(ids) + 1))
 
 
 def test_player_collection_replaced_on_refresh(db_path: Path) -> None:

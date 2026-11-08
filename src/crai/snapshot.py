@@ -28,6 +28,8 @@ from pathlib import Path
 
 lazy import polars as pl
 
+from .schema import LegacySchemaError, is_legacy
+
 log = logging.getLogger(__name__)
 
 MAX_PARTS = 16  # compact into one part beyond this
@@ -45,7 +47,7 @@ WHERE b.rowid BETWEEN ? AND ? AND b.team_size = 1
 
 def _schema() -> dict[str, pl.DataType]:
     return {
-        "battle_id": pl.String(),
+        "battle_id": pl.Int64(),
         "player_tag": pl.String(),
         "side": pl.Int8(),
         "result": pl.String(),
@@ -125,6 +127,8 @@ def sync(db_path: Path) -> int:
 def _sync(db_path: Path) -> int:
     d = snapshot_dir(db_path)
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60)) as conn:
+        if is_legacy(conn):
+            raise LegacySchemaError(db_path)
         latest: int = conn.execute("SELECT coalesce(max(rowid), 0) FROM battles").fetchone()[0]
         start = covered_rowid(db_path)
         if latest < start:  # database was rebuilt or shrunk underneath us
