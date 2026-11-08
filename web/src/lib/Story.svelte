@@ -50,6 +50,16 @@
     return () => query.removeEventListener("change", change);
   });
   // On a wide screen the cards pair up into sections you scroll through.
+  const sectionNames: Record<string, string> = {
+    you: "Overview",
+    deck: "Deck",
+    trend: "Form",
+    close: "Close games",
+    worst: "Matchups",
+    elixir: "Deck cost",
+    try: "Next steps",
+    goals: "Next steps",
+  };
   const sections = $derived(Array.from({ length: Math.ceil(slides.length / 2) }, (_, i) => slides.slice(i * 2, i * 2 + 2)));
 
   let index = $state(0);
@@ -93,8 +103,8 @@
 
 {#snippet says(line: string)}
   <div class="flex items-start gap-2">
-    <div class="shrink-0 -ml-1"><Rook mood="smug" size={52} /></div>
-    <p class="text-base leading-snug pt-1">{line}</p>
+    {#if !wide}<div class="shrink-0 -ml-1"><Rook mood="smug" size={52} /></div>{/if}
+    <p class="text-base lg:text-lg leading-snug pt-1 lg:pt-0">{line}</p>
   </div>
 {/snippet}
 
@@ -126,31 +136,31 @@
               <p class="text-xs text-center text-base-content/60" data-testid="similar">Compared with {report.similar.battles.toLocaleString()} similar battles from {report.similar.players.toLocaleString()} players{report.similar.near ? " near your trophies" : ""}, last {report.similar.days} days.</p>
             {/if}
           {:else if id === "deck"}
-            <h2 class="text-2xl">Your deck</h2>
+            <h2 class="text-2xl lg:text-3xl">Your deck</h2>
             <div class="grid grid-cols-4 gap-x-3 gap-y-4">
               {#each o.deck as c (c.id)}{@render tile(c, c.name, c.status)}{/each}
             </div>
-            <p class="text-sm text-base-content/70">{onCard ? "Tap any card to find out more." : `${o.avg_elixir} average elixir.`}</p>
+            <p class="text-sm text-base-content/70">{onCard ? `${wide ? "Click" : "Tap"} any card to find out more.` : `${o.avg_elixir} average elixir.`}</p>
           {:else if id === "trend" && s.trend}
-            <h2 class="text-2xl">Your form</h2>
+            <h2 class="text-2xl lg:text-3xl">Your form</h2>
             {@render says(s.lines.trend ?? "")}
-            <Visual visual={s.trend} />
+            <Visual visual={s.trend} {onCard} />
           {:else if id === "close" && s.close}
-            <h2 class="text-2xl">Close games</h2>
+            <h2 class="text-2xl lg:text-3xl">Close games</h2>
             {@render says(s.lines.close ?? "")}
             <Visual visual={s.close} />
           {:else if id === "worst" && s.worst}
-            <h2 class="text-2xl">What beats you</h2>
+            <h2 class="text-2xl lg:text-3xl">What beats you</h2>
             {@render says(s.lines.worst ?? "")}
             <Visual visual={s.worst} {onCard} titled={false} />
           {:else if id === "elixir" && s.elixir}
-            <h2 class="text-2xl">What your deck costs</h2>
+            <h2 class="text-2xl lg:text-3xl">What your deck costs</h2>
             {@render says(s.lines.elixir ?? "")}
             <Visual visual={s.elixir} />
           {:else if id === "try"}
             {@const weak = s.replace.weakest}
             {@const swap = s.replace.candidates[0]}
-            <h2 class="text-2xl">{swap || weak?.real ? "One thing to try" : "Anything to change?"}</h2>
+            <h2 class="text-2xl lg:text-3xl">{swap || weak?.real ? "One thing to try" : "Anything to change?"}</h2>
             {@render says(report.story.lines.replace)}
             {#if weak}
               <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid {swap ? 'grid-cols-[1fr_auto_1fr]' : 'grid-cols-1'} items-center gap-3">
@@ -162,9 +172,9 @@
               </div>
             {/if}
           {:else}
-            <div class="text-center">
-              <div class="flex justify-center"><Rook mood="idle" size={wide ? 56 : 96} /></div>
-              <h2 class="text-2xl mt-1">What do you want?</h2>
+            <div class="text-center lg:text-left">
+              {#if !wide}<div class="flex justify-center"><Rook mood="idle" size={96} /></div>{/if}
+              <h2 class="text-2xl lg:text-3xl mt-1 lg:mt-0">What do you want?</h2>
             </div>
             <div class="grid gap-2.5">
               {#each goals as g (g.id)}
@@ -187,14 +197,19 @@
 {#if wide}
   <div class="fixed inset-0 z-20 bg-base-100 overflow-y-auto" in:fly={{ y: 700, duration: 420, easing: cubicOut }} data-testid="dashboard">
     <header class="sticky top-0 z-10 bg-base-100/90 backdrop-blur border-b border-base-content/10">
-      <div class="mx-auto max-w-5xl px-8 h-16 flex items-center justify-between">
+      <div class="mx-auto max-w-6xl px-8 h-16 flex items-center justify-between gap-6">
         <div class="flex items-center gap-2"><Rook mood="smug" size={40} /><span class="text-xl font-semibold">Rook</span></div>
-        <button class="btn btn-ghost btn-sm font-medium cursor-pointer" onclick={onReset}>Not you?</button>
+        <nav class="flex items-center gap-1" aria-label="Sections" data-testid="section-nav">
+          {#each sections as group, i (group[0])}
+            <button class="btn btn-ghost btn-sm font-medium cursor-pointer" onclick={() => document.getElementById(`section-${i}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{sectionNames[group[0]]}</button>
+          {/each}
+        </nav>
+        <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onReset}>Not you?</button>
       </div>
     </header>
-    <div class="mx-auto max-w-5xl px-8">
+    <div class="mx-auto max-w-6xl px-8">
       {#each sections as group, i (group[0])}
-        <section class="min-h-[calc(100svh-4rem)] py-12 grid grid-cols-2 gap-14 items-center {i ? 'border-t border-base-content/10' : ''}" data-section>
+        <section id={`section-${i}`} class="scroll-mt-16 py-12 grid grid-cols-2 gap-16 items-start {i ? 'border-t border-base-content/10' : ''}" data-section>
           {#each group as id (id)}
             <div class="flex flex-col gap-4" data-card={id}>{@render slide(id)}</div>
           {/each}

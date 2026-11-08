@@ -2,11 +2,12 @@
   import type { Card } from "./api";
   let { card, sub, meta, status }: { card: Card; sub?: string; meta?: string; status?: "evolution" | "hero" | "both" | null } =
     $props();
+  let failedIcon = $state<string | null>(null); // the game's server is missing some card art
 </script>
 
 <figure>
-  {#if card.icon}
-    <img src={card.icon} alt={card.name} loading="lazy" class="w-full" />
+  {#if card.icon && failedIcon !== card.icon}
+    <img src={card.icon} alt={card.name} loading="lazy" class="w-full" onerror={() => (failedIcon = card.icon)} />
   {:else}
     <div class="aspect-[5/6] rounded-lg bg-base-300 grid place-items-center text-xs p-1 text-center">{card.name}</div>
   {/if}

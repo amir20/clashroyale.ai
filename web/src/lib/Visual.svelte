@@ -8,12 +8,7 @@
   const gain = (x: number) => `${x > 0 ? "+" : ""}${(x * 100).toFixed(1)}`;
   const gainTone = (x: number) => (x > 0 ? "text-success" : x < 0 ? "text-error" : "text-base-content/60");
   const dayLabel = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
-  const deckLabel = (d: any) =>
-    d.current
-      ? "Your deck now"
-      : d.added.length > 2
-        ? "A very different deck"
-        : `${d.added.join(" and ")} instead of ${d.removed.join(" and ")}`;
+  const names = (cards: any[]) => cards.map((c) => c.name).join(" and ");
   const trends: Record<string, { label: string; tone: string }> = {
     improving: { label: "Trending up", tone: "text-success" },
     slipping: { label: "Trending down", tone: "text-error" },
@@ -128,14 +123,27 @@
   {:else if v.type === "trend"}
     {#if v.verdict === "changed_decks"}
       <h4 class="text-sm font-semibold mb-3">Decks you've played, oldest first</h4>
-      <ul class="space-y-3.5">
+      <ul class="space-y-3 lg:space-y-6">
         {#each v.decks as d, i (i)}
           <li>
-            <div class="flex items-baseline justify-between gap-3 text-sm">
-              <span class="min-w-0 {d.current ? 'font-semibold text-primary' : ''}">{deckLabel(d)}</span>
+            <div class="flex items-center justify-between gap-3 text-sm">
+              {#if d.current}
+                <span class="font-semibold text-primary">Your deck now</span>
+              {:else if d.added.length > 2}
+                <span>A very different deck <span class="text-base-content/60">· {d.added.length} cards changed</span></span>
+              {:else}
+                <div class="flex items-center gap-1.5" data-testid="deck-change">
+                  {#each d.removed as c (c.id)}<div class="w-10 lg:w-14 opacity-75">{@render tile(c)}</div>{/each}
+                  <span class="text-primary px-0.5" aria-label="replaced by">→</span>
+                  {#each d.added as c (c.id)}<div class="w-10 lg:w-14">{@render tile(c)}</div>{/each}
+                </div>
+              {/if}
               <span class="stat-num shrink-0">{d.wins}–{d.losses}</span>
             </div>
-            <div class="flex h-1.5 gap-0.5 mt-1.5 rounded-full overflow-hidden" aria-hidden="true">
+            {#if !d.current && d.added.length <= 2}
+              <p class="text-sm mt-1.5" data-testid="deck-change-text">{names(d.added)} instead of {names(d.removed)}</p>
+            {/if}
+            <div class="flex h-1.5 lg:h-2 gap-0.5 mt-1.5 lg:mt-2 rounded-full overflow-hidden" aria-hidden="true">
               {#if d.wins}<div class="bg-success" style="width: {(d.wins / d.games) * 100}%"></div>{/if}
               <div class="flex-1 bg-error"></div>
             </div>

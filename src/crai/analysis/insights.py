@@ -252,15 +252,15 @@ def _decks_over_time(a: Analyzer, items: list[Game]) -> list[dict[str, Any]]:
     current = current_deck_key(items)
     now = set(_ids(current))
 
-    def names(ids: set[int]) -> list[str]:
-        return sorted(cards[c]["name"] for c in ids if c in cards)
+    def named(ids: set[int]) -> list[dict[str, Any]]:
+        return sorted((cards[c] for c in ids if c in cards), key=lambda c: c["name"])
 
     return [
         _record(gs)
         | {
             "current": key == current,
-            "added": names(set(_ids(key)) - now),  # compared with the deck they play now
-            "removed": names(now - set(_ids(key))),
+            "added": named(set(_ids(key)) - now),  # compared with the deck they play now
+            "removed": named(now - set(_ids(key))),
         }
         for key, gs in grouped.items()
         if len(gs) >= MIN_DECK_TIMELINE_GAMES
