@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 from conftest import ME, START, battle
 
-from crai import db, snapshot
-from crai.analytics import Analyzer
+from crai.analysis.analytics import Analyzer
+from crai.storage import database as db
+from crai.storage import snapshot
 
 
 def add_battles(db_path: Path, n: int, *, offset_days: int = 30) -> None:

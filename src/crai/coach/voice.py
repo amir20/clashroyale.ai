@@ -6,44 +6,7 @@ Lines are picked deterministically per player so a page reload doesn't change wh
 """
 
 import random
-from collections.abc import Iterable
-from pathlib import Path
 from typing import Any
-
-PROMPTS = Path(__file__).parent / "prompts"
-
-
-def system_prompt() -> str:
-    """Rook's instructions. Read on every question, so edits apply without a restart."""
-    return (PROMPTS / "system.txt").read_text()
-
-
-def tool_prompts() -> dict[str, tuple[str, str]]:
-    """Tool name -> (status label, description for the model), from prompts/tools.txt."""
-    tools: dict[str, tuple[str, str]] = {}
-    for line in (PROMPTS / "tools.txt").read_text().splitlines():
-        if line.strip() and not line.startswith("#"):
-            name, label, description = (part.strip() for part in line.split("|", 2))
-            tools[name] = (label, description)
-    return tools
-
-
-def suggestions_prompt() -> str:
-    """Instructions for proposing follow-up questions, limited to what the tools can answer."""
-    capabilities = "\n".join(f"- {desc}" for _, desc in tool_prompts().values())
-    return (PROMPTS / "suggestions.txt").read_text().replace("{capabilities}", capabilities)
-
-
-def parse_suggestions(text: str | None, asked: Iterable[str], limit: int = 3) -> list[str]:
-    """Clean the model's lines into usable questions, dropping anything malformed or repeated."""
-    seen = {q.strip().casefold() for q in asked}
-    found: list[str] = []
-    for raw in (text or "").splitlines():
-        q = raw.strip().lstrip("-*•0123456789.) ").strip('"')
-        if q.endswith("?") and 8 <= len(q) <= 90 and q.casefold() not in seen:
-            seen.add(q.casefold())
-            found.append(q)
-    return found[:limit]
 
 
 def _pct(x: float) -> str:
@@ -201,6 +164,17 @@ def evidence(tool: str, r: Any) -> str | None:
             return f"You haven't faced {r['card']} in {r['total_games_checked']} recorded games"
         case "my_decks_compared":
             return f"{len(r['decks'])} of your decks with at least 3 games"
+        case "show_swap":
+            return f"{r['family_decks']:,} decks like yours from the last 7 days"
+        case "show_matchup" if r["games"]:
+            wins = "1 win" if r["wins"] == 1 else f"{r['wins']} wins"
+            return f"{r['card']['name']}: {wins} in {r['games']} of your games"
+        case "show_matchup":
+            return f"You haven't faced {r['card']['name']} in your recorded games"
+        case "show_card_ranking":
+            return "Results across all players, last 7 days"
+        case "show_deck":
+            return f"{r['games']:,} games of this deck from {r['players']:,} players, last 7 days"
         case "best_partners_for_card":
             return "Card pairings across all players, last 7 days"
         case "counters_for_card":

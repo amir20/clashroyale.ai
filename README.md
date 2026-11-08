@@ -171,15 +171,20 @@ Per-player questions (`player_profile`, `player_cards`) and `run_sql` read SQLit
 
 ## Layout
 
+The code follows the pipeline, one folder per stage:
+
 ```
-src/crai/models.py      TypedDicts for the API payloads
-src/crai/api.py         async httpx client (retries, 429 backoff, concurrency limit)
-src/crai/db.py          SQLite schema, migrations, idempotent ingest (stage 2)
-src/crai/snapshot.py    incremental Parquet snapshot (stage 3)
-src/crai/crawl.py       breadth-first crawler (stage 1)
-src/crai/analytics.py   polars analytics (stage 4)
-src/crai/cli.py         typer CLI
-src/crai/mcp_server.py  MCP server
+src/crai/
+  collect/     game API client, crawler, API payload types (stage 1)
+  storage/     SQLite schema and writes, Parquet snapshot, upgrades (stages 2 and 3)
+  analysis/    analytics.py (deck stats), insights.py (one player), visuals.py (stage 4)
+  coach/       Rook: voice.py (scripted lines), agent.py (the AI loop), tools.py,
+               prompts/*.txt (editable without a restart)
+  web/         app.py (routes), loading.py (live status stream), service.py (reports, limits)
+  cli/         the crai commands, grouped by data, questions and servers
+  mcp_server.py   the same data as tools for Claude
+  config.py       settings from the environment and .env
+web/           the Svelte frontend
 ```
 
 ## Development

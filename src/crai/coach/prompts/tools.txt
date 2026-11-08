@@ -9,3 +9,7 @@ my_decks_compared | your decks | The player's decks with records.
 best_partners_for_card | what pairs with that card | Cards that pair best with a card, across all players.
 counters_for_card | what counters that card | Opponent cards that beat decks with a card, across all players.
 top_decks_with_cards | the best decks with those cards | Best decks containing cards, across all players.
+show_swap | that swap | Draws a comparison card on screen: how decks like the player's do running each of two cards. Use for any question about swapping or choosing between two cards.
+show_matchup | that matchup | Draws the player's record against one opponent card on screen.
+show_card_ranking | those cards | Draws a ranked list on screen for one card. kind "pairs" shows the best partners, "counters" shows the cards that beat it.
+show_deck | that deck | Draws the best proven full deck containing the given cards on screen, with a link to copy it into the game.

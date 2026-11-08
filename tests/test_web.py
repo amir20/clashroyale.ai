@@ -10,10 +10,14 @@ import pytest
 from conftest import ME, battles, profile
 from fastapi.testclient import TestClient
 
-from crai import coach, insights
-from crai.analytics import Analyzer
+from crai.analysis import insights
+from crai.analysis.analytics import Analyzer
+from crai.coach import agent, prompts
+from crai.coach.agent import _finished_text
+from crai.coach.tools import player_tools
 from crai.config import Settings
-from crai.web import DAILY_QUESTIONS, LOADS_PER_MINUTE, _finished_text, _tools, create_app
+from crai.web import create_app
+from crai.web.service import DAILY_QUESTIONS, LOADS_PER_MINUTE
 
 NEW = "#Q9Q"
 
@@ -97,6 +101,7 @@ def test_custom_question_uses_tools_then_answers(db_path: Path) -> None:
         "text": "Your deck. Tragic.",
         "left": DAILY_QUESTIONS - 1,
         "evidence": ["Your last 200 games"],
+        "visuals": [],
     }
 
 
@@ -156,8 +161,8 @@ def test_production_never_exposes_usage(db_path: Path) -> None:
 def test_every_tool_has_a_prompt_and_an_implementation(db_path: Path) -> None:
     with client(db_path) as c:
         svc = c.app.state.service  # ty: ignore[unresolved-attribute]
-        assert set(coach.tool_prompts()) == set(_tools(svc, ME))
-    assert "Rook" in coach.system_prompt()
+        assert set(prompts.tool_prompts()) == set(player_tools(svc, ME))
+    assert "Rook" in prompts.system_prompt()
 
 
 def test_record_against_any_card(analyzer: Analyzer) -> None:
@@ -224,12 +229,12 @@ def test_parse_suggestions_keeps_only_clean_new_questions() -> None:
     Too?
     Is Witch good here?
     One more valid question here?"""
-    assert coach.parse_suggestions(text, ["which card should i replace?"]) == [
+    assert agent.parse_suggestions(text, ["which card should i replace?"]) == [
         "How do I do against Hog?",
         "What pairs with Ronin?",
         "Is Witch good here?",
     ]
-    assert coach.parse_suggestions(None, []) == []
+    assert agent.parse_suggestions(None, []) == []
 
 
 def suggester(request: httpx.Request) -> httpx.Response:
@@ -285,3 +290,63 @@ def test_cards_show_how_they_were_played(level: int | None, status: str | None, 
     card = {"icon": "base", "evo_icon": "evo", "hero_icon": "hero"}
     played = insights._played_as(card, level)
     assert (played["status"], played["icon"]) == (status, art)
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "kind"),
+    [
+        ("show_swap", {"out_card": "hog", "in_card": "knight"}, "swap"),
+        ("show_matchup", {"card": "pekka"}, "matchup"),
+        ("show_card_ranking", {"card": "hog", "kind": "pairs"}, "ranking"),
+        ("show_card_ranking", {"card": "hog", "kind": "counters"}, "ranking"),
+        ("show_deck", {"cards": ["hog"]}, "deck"),
+    ],
+)
+def test_show_tools_become_visuals_built_from_data(
+    db_path: Path, tool: str, args: dict[str, Any], kind: str
+) -> None:
+    sent: list[Any] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body["messages"][-1])
+        if body["messages"][-1]["role"] == "tool":
+            reply: dict[str, Any] = {"role": "assistant", "content": "There you go."}
+        else:
+            call = {"id": "1", "function": {"name": tool, "arguments": json.dumps(args)}}
+            reply = {"role": "assistant", "tool_calls": [call]}
+        return httpx.Response(200, json={"choices": [{"message": reply}]})
+
+    with client(db_path, model, "k") as c:
+        out = events(c.post(f"/api/players/{ME[1:]}/ask", json={"question": "Show me"}).text)
+    answer = out[-1]
+    assert answer["type"] == "answer"
+    assert [v["type"] for v in answer["visuals"]] == [kind]
+    assert answer["evidence"]
+    assert "http" not in sent[-1]["content"]  # image links go to the page, not the model
+
+
+def test_a_failed_show_tool_draws_nothing(db_path: Path) -> None:
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["messages"][-1]["role"] == "tool":
+            assert "error" in body["messages"][-1]["content"]
+            reply: dict[str, Any] = {"role": "assistant", "content": "Never heard of it."}
+        else:
+            args = json.dumps({"card": "qqqqqqqq"})
+            call = {"id": "1", "function": {"name": "show_matchup", "arguments": args}}
+            reply = {"role": "assistant", "tool_calls": [call]}
+        return httpx.Response(200, json={"choices": [{"message": reply}]})
+
+    with client(db_path, model, "k") as c:
+        out = events(c.post(f"/api/players/{ME[1:]}/ask", json={"question": "Show me"}).text)
+    assert out[-1]["visuals"] == []
+
+
+def test_ai_calls_are_logged(db_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with client(db_path, priced_ai, "k") as c, caplog.at_level("INFO", logger="crai.coach.agent"):
+        c.post(f"/api/players/{ME[1:]}/ask", json={"question": "How am I doing?"})
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("AI question"))
+    assert "tools=get_overview" in line
+    assert "cost=$0.00040" in line
+    assert "How am I doing?" in line

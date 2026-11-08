@@ -7,12 +7,12 @@ import pytest
 from conftest import ME, battle, battles, flipped
 from legacy import make_legacy
 
-from crai import db
-from crai.analytics import Analyzer
-from crai.api import normalize_tag
-from crai.models import ApiPlayer
-from crai.schema import SCHEMA_VERSION, LegacySchemaError
-from crai.upgrade import upgrade
+from crai.analysis.analytics import Analyzer
+from crai.collect.client import normalize_tag
+from crai.collect.models import ApiPlayer
+from crai.storage import database as db
+from crai.storage.schema import SCHEMA_VERSION, LegacySchemaError
+from crai.storage.upgrade import upgrade
 
 START_OLD = datetime.now(UTC) - timedelta(days=40)
 

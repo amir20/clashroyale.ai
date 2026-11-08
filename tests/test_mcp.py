@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 
 from crai import mcp_server
-from crai.analytics import Analyzer
+from crai.analysis.analytics import Analyzer
 
 
 @pytest.fixture(autouse=True)

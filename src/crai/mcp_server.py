@@ -11,8 +11,7 @@ from typing import Any, TypedDict
 from mcp.server.mcpserver import MCPServer
 lazy import polars as pl
 
-from . import db, snapshot
-from .analytics import (
+from crai.analysis.analytics import (
     Analyzer,
     CardSort,
     CompareResult,
@@ -27,8 +26,10 @@ from .analytics import (
     SqlResult,
     records,
 )
-from .api import ClashClient, normalize_tag
-from .config import get_settings
+from crai.collect.client import ClashClient, normalize_tag
+from crai.config import get_settings
+from crai.storage import database as db
+from crai.storage import snapshot
 
 settings = get_settings()
 analyzer = Analyzer(settings.db_path)

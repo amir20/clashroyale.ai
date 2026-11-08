@@ -11,8 +11,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .models import ApiBattle, ApiCard, ApiPlayer, BattlePlayer, CardList
-from .schema import SCHEMA, SCHEMA_VERSION, LegacySchemaError, is_legacy
+from crai.collect.models import ApiBattle, ApiCard, ApiPlayer, BattlePlayer, CardList
+from crai.storage.schema import SCHEMA, SCHEMA_VERSION, LegacySchemaError, is_legacy
 
 # The same battle appears in both players' logs, sometimes with timestamps a second apart.
 # Battles between the same participants within this window are treated as one.

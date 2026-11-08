@@ -13,8 +13,8 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import snapshot
-from .schema import INDEXES, SCHEMA_VERSION, TABLES, is_legacy
+from crai.storage import snapshot
+from crai.storage.schema import INDEXES, SCHEMA_VERSION, TABLES, is_legacy
 
 log = logging.getLogger(__name__)
 

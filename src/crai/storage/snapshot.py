@@ -29,7 +29,7 @@ from pathlib import Path
 
 lazy import polars as pl
 
-from .schema import LegacySchemaError, is_legacy
+from crai.storage.schema import LegacySchemaError, is_legacy
 
 log = logging.getLogger(__name__)
 

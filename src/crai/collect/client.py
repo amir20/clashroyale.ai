@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 lazy import httpx
 
-from .models import ApiBattle, ApiPlayer, CardList, ItemsPage, RankedPlayer, Season
+from crai.collect.models import ApiBattle, ApiPlayer, CardList, ItemsPage, RankedPlayer, Season
 
 log = logging.getLogger(__name__)
 

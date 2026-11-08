@@ -18,8 +18,9 @@ from typing import Any, Literal, TypedDict
 
 lazy import polars as pl
 
-from . import db, snapshot
-from .api import normalize_tag
+from crai.collect.client import normalize_tag
+from crai.storage import database as db
+from crai.storage import snapshot
 
 # Battle types that don't reflect real deck strength.
 EXCLUDED_TYPES = (

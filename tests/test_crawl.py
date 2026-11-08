@@ -10,10 +10,10 @@ import httpx
 import pytest
 from conftest import START, battle, card_list, profile
 
-from crai import db
-from crai.api import ClashAPIError, ClashClient
-from crai.crawl import CrawlParams, crawl
-from crai.models import ApiBattle
+from crai.collect.client import ClashAPIError, ClashClient
+from crai.collect.crawl import CrawlParams, crawl
+from crai.collect.models import ApiBattle
+from crai.storage import database as db
 
 # seed '#22' fought '#88' and '#99'; '#88' fought '#PP' (depth 2); '#99' always 500s.
 GRAPH = frozendict({"#22": ("#88", "#99"), "#88": ("#22", "#PP"), "#PP": ("#88",)})

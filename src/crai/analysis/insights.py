@@ -9,8 +9,8 @@ from typing import Any
 
 import polars as pl
 
-from .analytics import DEFAULT_SINCE_DAYS, EXCLUDED_TYPES, Analyzer, _margin
-from .api import normalize_tag
+from crai.analysis.analytics import DEFAULT_SINCE_DAYS, EXCLUDED_TYPES, Analyzer, _margin
+from crai.collect.client import normalize_tag
 
 type Game = dict[str, Any]
 

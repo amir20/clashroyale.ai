@@ -6,7 +6,7 @@ from collections import Counter
 import httpx
 import pytest
 
-from crai.api import ClashAPIError, ClashClient
+from crai.collect.client import ClashAPIError, ClashClient
 from crai.config import get_settings
 
 KEYS = ["k1", "k2", "k3", "k4"]

@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from conftest import HOG, ME, PEKKA, battle
 
-from crai import db
-from crai.analytics import Analyzer, CardNotFound, Filters
+from crai.analysis.analytics import Analyzer, CardNotFound, Filters
+from crai.storage import database as db
 
 
 @pytest.mark.parametrize(

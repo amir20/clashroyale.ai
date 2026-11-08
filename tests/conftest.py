@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from crai import db
-from crai.analytics import Analyzer
-from crai.models import ApiBattle, ApiCard, ApiPlayer, BattlePlayer, CardList
+from crai.analysis.analytics import Analyzer
+from crai.collect.models import ApiBattle, ApiCard, ApiPlayer, BattlePlayer, CardList
+from crai.storage import database as db
 
 CARDS = frozendict(
     {

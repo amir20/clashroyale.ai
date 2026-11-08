@@ -68,7 +68,7 @@ export async function getAnswer(tag: string, id: string): Promise<{ line: string
 
 export type AskEvent =
   | { type: "status"; message: string }
-  | { type: "answer"; text: string; left: number; evidence: string[]; usage?: Usage }
+  | { type: "answer"; text: string; left: number; evidence: string[]; visuals: any[]; usage?: Usage }
   | { type: "error"; message: string };
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };

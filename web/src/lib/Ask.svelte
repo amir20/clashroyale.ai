@@ -3,10 +3,11 @@
   import { askRook, getAnswer, getSuggestions, type ChatTurn, type Report, type Usage } from "./api";
   import Answer from "./Answer.svelte";
   import Rook, { type Mood } from "./Rook.svelte";
+  import Visual from "./Visual.svelte";
 
   let { tag, report }: { tag: string; report: Report } = $props();
 
-  type Turn = { key: number; q: string; id?: string; status?: string; line?: string; data?: any; failed?: boolean; usage?: Usage; evidence?: string[] };
+  type Turn = { key: number; q: string; id?: string; status?: string; line?: string; data?: any; failed?: boolean; usage?: Usage; evidence?: string[]; visuals?: any[] };
   type Option = { label: string; id?: string };
 
   let turns = $state<Turn[]>([]);
@@ -105,7 +106,7 @@
       await askRook(tag, q, earlier, (ev) => {
         if (ev.type === "status") update(k, { status: ev.message });
         else if (ev.type === "answer") {
-          update(k, { status: undefined, line: ev.text, usage: ev.usage, evidence: ev.evidence });
+          update(k, { status: undefined, line: ev.text, usage: ev.usage, evidence: ev.evidence, visuals: ev.visuals });
           left = ev.left;
         } else update(k, { status: undefined, line: ev.message, failed: true });
       });
@@ -151,6 +152,7 @@
         {:else}
           <p class="says">{t.line}</p>
           {#if t.id && t.data}<div class="mt-4"><Answer id={t.id} data={t.data} /></div>{/if}
+          {#each t.visuals ?? [] as v, i (i)}<div class="mt-4"><Visual visual={v} /></div>{/each}
           {#if t.evidence?.length}
             <p class="mt-4 pt-3 border-t border-base-content/10 text-xs text-base-content/70" data-testid="evidence"><span class="font-semibold text-base-content">Based on:</span> {t.evidence.join(" · ")}</p>
           {/if}
