@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "clash-royale": {
+      "command": "uv",
+      "args": ["run", "--directory", "/Users/amirraminfar/Workspace/clashroyale.ai", "crai", "mcp"]
+    }
+  }
+}
