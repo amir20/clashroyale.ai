@@ -7,6 +7,7 @@ from conftest import ME, battles, flipped
 
 from crai import db
 from crai.api import normalize_tag
+from crai.models import ApiPlayer
 
 
 def count(path: Path, table: str) -> int:
@@ -83,3 +84,25 @@ def test_player_collection_replaced_on_refresh(db_path: Path) -> None:
             conn, {"tag": ME, "cards": [{"id": 26000000, "level": 16, "maxLevel": 16}]}
         )
     assert count(db_path, "player_cards") == 1
+
+
+def test_explicit_nulls_from_api(db_path: Path) -> None:
+    """Regression: the API sends `null` for absent objects (e.g. no ranked season this year)."""
+    nulls: ApiPlayer = {
+        "tag": "#9Q",
+        "clan": None,
+        "arena": None,
+        "currentPathOfLegendSeasonResult": None,
+        "bestPathOfLegendSeasonResult": None,
+        "cards": None,
+        "supportCards": None,
+        "currentDeck": None,
+    }
+    b = battles(1)[0]
+    b["arena"] = b["gameMode"] = None
+    b["team"] = [p | {"clan": None, "supportCards": None, "crowns": None} for p in b["team"] or []]
+    with db.session(db_path) as conn:
+        db.upsert_player(conn, nulls)
+        db.upsert_cards(conn, {"items": None, "supportItems": None})
+        assert db.ingest_battle(conn, flipped(b, shift_seconds=600))
+    assert count(db_path, "battles") == 201

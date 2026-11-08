@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
 import httpx
@@ -80,3 +81,25 @@ async def test_forbidden_is_fatal(tmp_path: Path) -> None:
     with db.session(path, read_only=True) as conn:
         status = conn.execute("SELECT status FROM crawl_runs").fetchone()[0]
     assert status == "error"
+
+
+async def test_malformed_player_is_skipped_not_fatal(tmp_path: Path) -> None:
+    def broken_88(request: httpx.Request) -> httpx.Response:
+        if unquote(request.url.path).endswith("#88/battlelog"):
+            # Deliberately ill-typed, so built as raw JSON: a card without an id, in a battle with
+            # a unique time (a duplicate would be skipped by dedup before the card is read).
+            bad: list[Any] = json.loads(json.dumps(log_for("#88")))
+            bad[0]["battleTime"] = "20261101T235959.000Z"
+            bad[0]["team"] = [{"tag": "#88", "cards": [{"name": "no id"}]}]
+            return httpx.Response(200, json=bad)
+        return handler(request)
+
+    async with client(httpx.MockTransport(broken_88)) as c:
+        with db.session(tmp_path / "c.db") as conn:
+            stats = await crawl(c, conn, CrawlParams(top=1, depth=2))
+            fetched_88 = conn.execute(
+                "SELECT battlelog_fetched_at FROM players WHERE tag = '#88'"
+            ).fetchone()
+    assert stats.players_failed == 2  # #99 (HTTP 500) and #88 (malformed)
+    assert stats.players_fetched == 1  # #22; #PP is never discovered because #88 was skipped
+    assert fetched_88 is None or fetched_88[0] is None  # rolled back, so it's retried next run

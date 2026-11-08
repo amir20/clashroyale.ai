@@ -1,7 +1,9 @@
 """Typed shapes of the Clash Royale API payloads we consume.
 
-Only the fields we read are declared. Everything is optional (`total=False`) because the API
-omits fields freely (e.g. no `startingTrophies` in Path of Legend battles).
+Only the fields we read are declared. Fields are optional because the API omits them freely
+(e.g. no `startingTrophies` in Path of Legend battles), and nested objects/lists are `| None`
+because it also sends explicit nulls (e.g. `currentPathOfLegendSeasonResult: null`). Always read
+them as `x.get(k) or {}`, never `x.get(k, {})`, which returns None for an explicit null.
 """
 
 from typing import NotRequired, TypedDict
@@ -23,12 +25,12 @@ class ApiCard(TypedDict):
     starLevel: NotRequired[int]
     evolutionLevel: NotRequired[int]
     count: NotRequired[int]
-    iconUrls: NotRequired[IconUrls]
+    iconUrls: NotRequired[IconUrls | None]
 
 
 class CardList(TypedDict, total=False):
-    items: list[ApiCard]
-    supportItems: list[ApiCard]
+    items: list[ApiCard] | None
+    supportItems: list[ApiCard] | None
 
 
 class Named(TypedDict, total=False):
@@ -53,27 +55,27 @@ class ApiPlayer(TypedDict):
     losses: NotRequired[int]
     battleCount: NotRequired[int]
     threeCrownWins: NotRequired[int]
-    clan: NotRequired[Named]
-    arena: NotRequired[Named]
-    currentPathOfLegendSeasonResult: NotRequired[PathOfLegendResult]
-    bestPathOfLegendSeasonResult: NotRequired[PathOfLegendResult]
-    cards: NotRequired[list[ApiCard]]
-    supportCards: NotRequired[list[ApiCard]]
-    currentDeck: NotRequired[list[ApiCard]]
+    clan: NotRequired[Named | None]
+    arena: NotRequired[Named | None]
+    currentPathOfLegendSeasonResult: NotRequired[PathOfLegendResult | None]
+    bestPathOfLegendSeasonResult: NotRequired[PathOfLegendResult | None]
+    cards: NotRequired[list[ApiCard] | None]
+    supportCards: NotRequired[list[ApiCard] | None]
+    currentDeck: NotRequired[list[ApiCard] | None]
 
 
 class BattlePlayer(TypedDict, total=False):
     tag: str
     name: str
-    clan: Named
+    clan: Named | None
     startingTrophies: int
     trophyChange: int
-    crowns: int
+    crowns: int | None
     kingTowerHitPoints: int
     princessTowersHitPoints: list[int] | None
     elixirLeaked: float
-    cards: list[ApiCard]
-    supportCards: list[ApiCard]
+    cards: list[ApiCard] | None
+    supportCards: list[ApiCard] | None
 
 
 class ApiBattle(TypedDict, total=False):
@@ -83,10 +85,10 @@ class ApiBattle(TypedDict, total=False):
     isHostedMatch: bool
     leagueNumber: int
     deckSelection: str
-    arena: Named
-    gameMode: Named
-    team: list[BattlePlayer]
-    opponent: list[BattlePlayer]
+    arena: Named | None
+    gameMode: Named | None
+    team: list[BattlePlayer] | None
+    opponent: list[BattlePlayer] | None
 
 
 class RankedPlayer(TypedDict, total=False):
@@ -102,4 +104,4 @@ class Season(TypedDict, total=False):
 
 
 class ItemsPage[T](TypedDict, total=False):
-    items: list[T]
+    items: list[T] | None

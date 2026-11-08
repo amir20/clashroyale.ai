@@ -133,16 +133,28 @@ async def crawl(client: ClashClient, conn: sqlite3.Connection, params: CrawlPara
                 elif r.profile is None and not r.battles:
                     stats.players_missing += 1
                 else:
-                    if r.profile:
-                        db.upsert_player(
-                            conn,
-                            r.profile,
-                            is_seed=r.tag in seed_set,
-                            seed_rank=seed_rank.get(r.tag),
-                            depth=depth,
-                        )
-                    stats.battles_new += db.ingest_battlelog(conn, r.battles)
-                    db.mark_battlelog_fetched(conn, r.tag)
+                    # One player's malformed payload shouldn't end a 10k-player crawl: roll back
+                    # just that player's writes and move on. DB errors (locked, full) still raise.
+                    conn.execute("SAVEPOINT player")
+                    try:
+                        if r.profile:
+                            db.upsert_player(
+                                conn,
+                                r.profile,
+                                is_seed=r.tag in seed_set,
+                                seed_rank=seed_rank.get(r.tag),
+                                depth=depth,
+                            )
+                        new = db.ingest_battlelog(conn, r.battles)
+                        db.mark_battlelog_fetched(conn, r.tag)
+                    except KeyError, TypeError, AttributeError, ValueError:
+                        conn.execute("ROLLBACK TO player")
+                        conn.execute("RELEASE player")
+                        stats.players_failed += 1
+                        log.warning("skipping %s: malformed payload", r.tag, exc_info=True)
+                        continue
+                    conn.execute("RELEASE player")
+                    stats.battles_new += new
                     stats.players_fetched += 1
                     discovered += _discovered(r, expand_friendly=params.expand_friendly)
                 if done % 50 == 0:

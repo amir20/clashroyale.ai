@@ -246,13 +246,13 @@ def upsert_cards(conn: sqlite3.Connection, payload: CardList) -> int:
             c.get("maxLevel"),
             c.get("maxEvolutionLevel"),
             is_support,
-            c.get("iconUrls", {}).get("medium"),
-            c.get("iconUrls", {}).get("evolutionMedium"),
+            (c.get("iconUrls") or {}).get("medium"),
+            (c.get("iconUrls") or {}).get("evolutionMedium"),
             ts,
         )
         for is_support, cards in (
-            (0, payload.get("items", [])),
-            (1, payload.get("supportItems", [])),
+            (0, (payload.get("items") or [])),
+            (1, (payload.get("supportItems") or [])),
         )
         for c in cards
     ]
@@ -283,7 +283,7 @@ def _ensure_cards(conn: sqlite3.Connection, cards: Iterable[ApiCard], is_support
                 c.get("elixirCost"),
                 c.get("maxLevel"),
                 is_support,
-                c.get("iconUrls", {}).get("medium"),
+                (c.get("iconUrls") or {}).get("medium"),
             )
             for c in cards
         ],
@@ -302,9 +302,9 @@ def upsert_player(
     depth: int | None = None,
 ) -> None:
     ts = now_iso()
-    clan = p.get("clan", {})
-    pol = p.get("currentPathOfLegendSeasonResult", {})
-    best_pol = p.get("bestPathOfLegendSeasonResult", {})
+    clan = p.get("clan") or {}
+    pol = p.get("currentPathOfLegendSeasonResult") or {}
+    best_pol = p.get("bestPathOfLegendSeasonResult") or {}
     tag = p["tag"]
     conn.execute(
         """INSERT INTO players (tag, name, exp_level, trophies, best_trophies, wins, losses,
@@ -336,7 +336,7 @@ def upsert_player(
             p.get("threeCrownWins"),
             clan.get("tag"),
             clan.get("name"),
-            p.get("arena", {}).get("name"),
+            (p.get("arena") or {}).get("name"),
             pol.get("leagueNumber"),
             pol.get("trophies"),
             pol.get("rank"),
@@ -349,8 +349,8 @@ def upsert_player(
             ts,
         ),
     )
-    cards = p.get("cards", [])
-    support = p.get("supportCards", [])
+    cards = p.get("cards") or []
+    support = p.get("supportCards") or []
     _ensure_cards(conn, cards, 0)
     _ensure_cards(conn, support, 1)
     if cards or support:
@@ -371,7 +371,7 @@ def upsert_player(
                 for c in [*cards, *support]
             ],
         )
-    if deck := p.get("currentDeck", []):
+    if deck := (p.get("currentDeck") or []):
         conn.execute("DELETE FROM player_current_deck WHERE tag = ?", (tag,))
         conn.executemany(
             """INSERT INTO player_current_deck
@@ -396,7 +396,7 @@ def mark_battlelog_fetched(conn: sqlite3.Connection, tag: str) -> None:
 
 
 def participants(b: ApiBattle) -> list[BattlePlayer]:
-    return [*b.get("team", []), *b.get("opponent", [])]
+    return [*(b.get("team") or []), *(b.get("opponent") or [])]
 
 
 def _tags(b: ApiBattle) -> list[str]:
@@ -424,7 +424,7 @@ def _is_duplicate(conn: sqlite3.Connection, participants_key: str, battle_time: 
 
 def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
     """Insert one battle (from either participant's battlelog). Returns True if it was new."""
-    team, opp = b.get("team", []), b.get("opponent", [])
+    team, opp = (b.get("team") or []), (b.get("opponent") or [])
     if not team or not opp:
         return False
     bid = battle_id(b)
@@ -437,7 +437,7 @@ def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
     sides: list[list[BattlePlayer]] = [team, opp]
     if min(p.get("tag", "") for p in opp) < min(p.get("tag", "") for p in team):
         sides = [opp, team]
-    game_mode = b.get("gameMode", {})
+    game_mode = b.get("gameMode") or {}
     cur = conn.execute(
         """INSERT OR IGNORE INTO battles (id, battle_time, participants_key, battle_type,
                game_mode_id, game_mode, arena, deck_selection, is_ladder_tournament,
@@ -450,10 +450,10 @@ def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
             b.get("type"),
             game_mode.get("id"),
             game_mode.get("name"),
-            b.get("arena", {}).get("name"),
+            (b.get("arena") or {}).get("name"),
             b.get("deckSelection"),
-            int(b.get("isLadderTournament", False)),
-            int(b.get("isHostedMatch", False)),
+            int(b.get("isLadderTournament") or False),
+            int(b.get("isHostedMatch") or False),
             b.get("leagueNumber"),
             len(team),
             now_iso(),
@@ -462,7 +462,7 @@ def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
     if cur.rowcount == 0:
         return False
 
-    side_crowns = [max(p.get("crowns", 0) for p in s) for s in sides]
+    side_crowns = [max((p.get("crowns") or 0) for p in s) for s in sides]
     for side_idx, side in enumerate(sides):
         mine, theirs = side_crowns[side_idx], side_crowns[1 - side_idx]
         for p in side:
@@ -480,8 +480,8 @@ def _ingest_participant(
     mine: int,
     theirs: int,
 ) -> None:
-    cards = p.get("cards", [])
-    support = p.get("supportCards", [])
+    cards = p.get("cards") or []
+    support = p.get("supportCards") or []
     _ensure_cards(conn, cards, 0)
     _ensure_cards(conn, support, 1)
     deck_key = "-".join(str(i) for i in sorted(c["id"] for c in cards)) if len(cards) == 8 else None
@@ -500,7 +500,7 @@ def _ingest_participant(
             tag,
             side_idx,
             p.get("name"),
-            p.get("clan", {}).get("tag"),
+            (p.get("clan") or {}).get("tag"),
             p.get("startingTrophies"),
             p.get("trophyChange"),
             p.get("crowns"),
