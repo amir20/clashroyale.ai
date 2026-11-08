@@ -40,7 +40,7 @@ type SqlParams = Sequence[object] | dict[str, object]
 # can't unwrap TypeAliasType yet.
 CardSort = Literal["use_rate", "win_rate", "adj_win_rate", "games"]
 PairSort = Literal["games", "adj_win_rate", "lift", "synergy"]
-DeckSort = Literal["adj_win_rate", "win_rate", "games"]
+DeckSort = Literal["adj_win_rate", "win_rate", "games", "lower_bound"]
 MatchupMode = Literal["counters", "favorable"]
 
 
@@ -171,6 +171,18 @@ class CardNotFound(ValueError):
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _is_typo_of(query: str, name: str) -> bool:
+    """Is `query` a misspelling of `name`? Word by word, so Fire Golem doesn't become Ice Golem."""
+    said, real = re.findall(r"[a-z0-9]+", query.lower()), re.findall(r"[a-z0-9]+", name.lower())
+
+    def close(x: str, y: str) -> bool:
+        return difflib.SequenceMatcher(None, x, y).ratio() >= 0.75
+
+    if len(said) == 1:
+        return close(said[0], "".join(real))
+    return len(said) == len(real) and all(map(close, said, real, strict=True))
 
 
 def _adj(wins: pl.Expr, games: pl.Expr) -> pl.Expr:
@@ -313,7 +325,8 @@ class Analyzer:
                 opts = ", ".join(sorted(all_names[h] for h in hits))
                 raise CardNotFound(f"'{query}' is ambiguous: {opts}")
         by_norm = {n: cid for cid, n in names.items()}
-        if close := difflib.get_close_matches(q, list(by_norm), n=1, cutoff=0.75):
+        typos = [n for n, cid in by_norm.items() if _is_typo_of(query, all_names[cid])]
+        if close := difflib.get_close_matches(q, typos, n=1, cutoff=0):
             return by_norm[close[0]]
         suggestions = difflib.get_close_matches(q, list(by_norm), n=5, cutoff=0.4)
         hints = [all_names[by_norm[s]] for s in suggestions]
@@ -527,8 +540,14 @@ class Analyzer:
         min_games: int = 10,
         sort_by: DeckSort = "adj_win_rate",
         limit: int = 20,
+        min_players: int = 1,
+        max_top3_share: float = 1.0,
     ) -> list[DeckResult]:
-        """Most successful/popular exact 8-card decks, optionally containing/excluding cards."""
+        """Most successful/popular exact 8-card decks, optionally containing/excluding cards.
+
+        `max_top3_share` drops decks whose games mostly come from three players, and sorting by
+        `lower_bound` ranks by what the sample can vouch for, so a lucky small deck can't win.
+        """
         d = self._containing(self._subject(f, top_only), self.resolve_cards(include))
         for cid in self.resolve_cards(exclude):
             d = d.filter(~pl.col("cards").list.contains(cid))
@@ -542,10 +561,20 @@ class Analyzer:
                 cards=pl.col("cards").first(),
             )
             .pipe(_with_rates)
-            .filter(pl.col("games") >= min_games)
-            .sort(sort_by, "games", descending=True)
-            .head(limit)
+            .with_columns(lower_bound=pl.col("win_rate") - pl.col("margin"))
+            .filter(pl.col("games") >= min_games, pl.col("players") >= min_players)
         )
+        if max_top3_share < 1:
+            top3 = (
+                d.group_by("deck_key", "player_tag")
+                .len()
+                .group_by("deck_key")
+                .agg(top3=pl.col("len").top_k(3).sum())
+            )
+            g = g.join(top3, on="deck_key").filter(
+                pl.col("top3") <= max_top3_share * pl.col("games")
+            )
+        g = g.sort(sort_by, "games", descending=True).head(limit)
         return [self._deck_result(r) for r in g.iter_rows(named=True)]
 
     def complete_deck(

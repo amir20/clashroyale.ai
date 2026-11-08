@@ -4,7 +4,7 @@
 </script>
 
 <!-- Rook is an original character: a small crow with a scarf and opinions. -->
-<svg class="rook {mood}" width={size} height={size} viewBox="0 0 200 200" role="img" aria-label="Rook the crow">
+<svg class="rook {mood}" style="--glow: {Math.round(size * 0.13)}px" width={size} height={size} viewBox="0 0 200 200" role="img" aria-label="Rook the crow">
   <ellipse class="shadow" cx="100" cy="186" rx="52" ry="8" />
   <g class="whole">
     <path class="foot" d="M78 168 l-8 14 M78 168 l2 15 M78 168 l10 13" />
@@ -33,7 +33,7 @@
 </svg>
 
 <style>
-  .rook { overflow: visible; filter: drop-shadow(0 0 22px #7f89d655); }
+  .rook { overflow: visible; filter: drop-shadow(0 0 var(--glow) #7f89d655); }
   .shadow { fill: #0007; }
   .foot { stroke: #ffc53d; stroke-width: 5; stroke-linecap: round; fill: none; }
   .brow { stroke: #12142b; stroke-width: 6; stroke-linecap: round; transform-box: fill-box; transform-origin: center; }

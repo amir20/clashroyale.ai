@@ -1,13 +1,14 @@
 """Rook's prompts. The .txt files here are read on every call, so edits apply without a restart."""
 
+from collections.abc import Iterable
 from pathlib import Path
 
 PROMPTS = Path(__file__).parent
 
 
-def system_prompt() -> str:
+def system_prompt(card_names: Iterable[str] = ()) -> str:
     """Rook's instructions. Read on every question, so edits apply without a restart."""
-    return (PROMPTS / "system.txt").read_text()
+    return (PROMPTS / "system.txt").read_text().replace("{cards}", ", ".join(card_names))
 
 
 def tool_prompts() -> dict[str, tuple[str, str]]:
@@ -22,5 +23,7 @@ def tool_prompts() -> dict[str, tuple[str, str]]:
 
 def suggestions_prompt() -> str:
     """Instructions for proposing follow-up questions, limited to what the tools can answer."""
-    capabilities = "\n".join(f"- {desc}" for _, desc in tool_prompts().values())
+    capabilities = "\n".join(
+        f"- {desc}" for name, (_, desc) in tool_prompts().items() if name != "not_about_the_game"
+    )
     return (PROMPTS / "suggestions.txt").read_text().replace("{capabilities}", capabilities)

@@ -83,6 +83,10 @@ def _finished_text(content: str | None, finish_reason: str | None) -> str:
     return text[: end + 1] if end >= 0 else ""
 
 
+def _only_swaps(visuals: list[dict[str, Any]]) -> bool:
+    return bool(visuals) and all(v["type"] == "swap" for v in visuals)
+
+
 async def ask_coach(
     svc: CoachContext, tag: str, question: str, left: int, history: list[Turn]
 ) -> AsyncIterator[dict[str, Any]]:
@@ -103,8 +107,10 @@ async def _ask_coach(
     labels = prompts.tool_prompts()
     started = time.monotonic()
     spent: dict[str, Any] = {"rounds": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+    async with svc.lock:
+        card_names = await asyncio.to_thread(lambda: sorted(svc.analyzer.card_names().values()))
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": prompts.system_prompt()},
+        {"role": "system", "content": prompts.system_prompt(card_names)},
         *[t.model_dump() for t in history],
         {"role": "user", "content": question},
     ]
@@ -155,7 +161,7 @@ async def _ask_coach(
                     return
                 answer = {
                     "type": "answer",
-                    "text": text,
+                    "text": voice.tidy(text, _only_swaps(visuals)),
                     "left": left,
                     "evidence": evidence,
                     "visuals": visuals,
@@ -186,7 +192,12 @@ async def _ask_coach(
                 if (fact := voice.evidence(name, result)) and fact not in evidence:
                     evidence.append(fact)
                 is_visual = isinstance(result, dict) and "type" in result and "error" not in result
-                if name.startswith("show_") and is_visual and len(visuals) < MAX_VISUALS:
+                if (
+                    name.startswith("show_")
+                    and is_visual
+                    and result not in visuals
+                    and len(visuals) < MAX_VISUALS
+                ):
                     visuals.append(result)
                 messages.append(
                     {

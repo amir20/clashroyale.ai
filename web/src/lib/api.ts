@@ -10,7 +10,7 @@ export type Report = {
     recent: string[];
   };
   intro: string;
-  similar: { battles: number; players: number; days: number; enough: boolean } | null;
+  similar: { battles: number; players: number; days: number; enough: boolean; near: boolean } | null;
   patterns: {
     close_games: { games: number; wins: number; losses: number };
     three_crown_wins: number;
@@ -21,6 +21,15 @@ export type Report = {
     elixir_leaked_losses: number | null;
   };
   patterns_line: string;
+  story: {
+    trend: any | null;
+    close: any | null;
+    worst: any | null;
+    elixir: any | null;
+    replace: any;
+    lines: { trend: string | null; close: string | null; worst: string | null; elixir: string | null; replace: string };
+  };
+  cards: Card[];
   questions: { id: string; label: string }[];
   custom_questions_per_day: number;
   ai_enabled: boolean;

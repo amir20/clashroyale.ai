@@ -5,7 +5,7 @@
   import Rook, { type Mood } from "./Rook.svelte";
   import Visual from "./Visual.svelte";
 
-  let { tag, report }: { tag: string; report: Report } = $props();
+  let { tag, report, onCard }: { tag: string; report: Report; onCard?: (card: any) => void } = $props();
 
   type Turn = { key: number; q: string; id?: string; status?: string; line?: string; data?: any; failed?: boolean; usage?: Usage; evidence?: string[]; visuals?: any[] };
   type Option = { label: string; id?: string };
@@ -22,6 +22,7 @@
   let left = $state<number | null>(null);
   let key = 0;
   let suggestRun = 0;
+  const offered = new Set<string>(); // every suggestion shown so far, so they don't come back
 
   const digging = ["Digging through your battles…", "Doing the math so you don't have to…", "Checking the receipts…"];
   const mood = $derived<Mood>(busy ? "thinking" : turns.at(-1)?.failed ? "oops" : turns.length ? "smug" : "idle");
@@ -69,11 +70,12 @@
     const run = ++suggestRun;
     thinkingOfMore = true;
     try {
-      const taken = [...turns.map((t) => t.q), ...builtIn.map((o) => o.label)];
+      const taken = [...new Set([...offered, ...turns.map((t) => t.q), ...builtIn.map((o) => o.label)])].slice(-40);
       const res = await getSuggestions(tag, history(), taken);
       if (run !== suggestRun) return;
       const free = new Set(builtIn.map((o) => o.label.toLowerCase()));
       suggested = res.suggestions.filter((q) => !free.has(q.toLowerCase())).map((label) => ({ label }));
+      res.suggestions.forEach((q) => offered.add(q));
       if (res.usage) {
         suggestUsage = res.usage;
         suggestCost += res.usage.cost_usd;
@@ -121,6 +123,12 @@
     suggestNext();
   }
 
+  /** Ask from outside the chat: a goal, or a choice on a card. */
+  export function ask(q: string, id?: string) {
+    if (id) preset(id, q);
+    else custom(q);
+  }
+
   function pick(o: Option) {
     if (o.id) preset(o.id, o.label);
     else custom(o.label);
@@ -152,7 +160,7 @@
         {:else}
           <p class="says">{t.line}</p>
           {#if t.id && t.data}<div class="mt-4"><Answer id={t.id} data={t.data} /></div>{/if}
-          {#each t.visuals ?? [] as v, i (i)}<div class="mt-4"><Visual visual={v} /></div>{/each}
+          {#each t.visuals ?? [] as v, i (i)}<div class="mt-4"><Visual visual={v} {onCard} /></div>{/each}
           {#if t.evidence?.length}
             <p class="mt-4 pt-3 border-t border-base-content/10 text-xs text-base-content/70" data-testid="evidence"><span class="font-semibold text-base-content">Based on:</span> {t.evidence.join(" · ")}</p>
           {/if}

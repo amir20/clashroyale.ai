@@ -2,6 +2,7 @@
   import CardTile from "./CardTile.svelte";
   let { id, data }: { id: string; data: any } = $props();
   const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const per100 = (x: number) => `${x > 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(1)} per 100`;
   const verdict = (c: any) =>
     !c.real
       ? { label: "No difference", tone: "badge-ghost" }
@@ -25,7 +26,7 @@
         <div class="w-10 shrink-0"><CardTile card={c} /></div>
         <div class="flex-1 min-w-0">
           <div class="truncate">{c.name}</div>
-          <div class="text-xs opacity-70 tabular-nums whitespace-nowrap">{pct(c.win_rate_with)} with · {pct(c.win_rate_without)} without</div>
+          <div class="text-xs opacity-70 tabular-nums whitespace-nowrap">{per100(c.gain)} games won vs decks without it</div>
         </div>
         <span class="badge badge-sm badge-soft whitespace-nowrap {v.tone}">{v.label}</span>
       </li>
@@ -34,7 +35,7 @@
   {#if data.candidates.length}
     <h4 class="text-sm font-semibold mt-5 mb-2">Worth a try</h4>
     <div class="grid grid-cols-4 gap-2 max-w-md">
-      {#each data.candidates as c (c.id)}<CardTile card={c} sub={`wins ${pct(c.win_rate_with)} · ${c.players} players`} />{/each}
+      {#each data.candidates as c (c.id)}<CardTile card={c} sub={`${per100(c.gain)} · ${c.players} players`} />{/each}
     </div>
   {/if}
 {:else if id === "best_cards"}

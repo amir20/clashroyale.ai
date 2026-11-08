@@ -5,6 +5,9 @@ answers need no AI call and can't be hallucinated. `coach.py` turns these result
 """
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
+from math import ceil
+from statistics import median
 from typing import Any
 
 import polars as pl
@@ -15,6 +18,18 @@ from crai.collect.client import normalize_tag
 type Game = dict[str, Any]
 
 MIN_FAMILY_DECKS = 200
+MIN_CLOSE_FAMILY_DECKS = 1000  # enough decks to afford requiring a closer match
+CLOSE_SHARED_CARDS = 5
+NEAR_TROPHIES_SHARE = 0.07  # "your trophy range" is within this share of the player's trophies
+MIN_TREND_GAMES = 20
+MIN_SAME_DECK_GAMES = 10  # per half, to compare a deck with itself
+MIN_DECK_TIMELINE_GAMES = 5
+MAX_DECK_TIMELINE = 5
+HARDER_LOBBY_TROPHIES = 200
+SMALLEST_SWING = 0.05  # less than this isn't a change worth chasing
+SWING_WORTH_SETTLING = 0.15
+AGAINST_SCOPE = "Games where the OPPONENT's deck had this card. The player was not using it."
+WITH_SCOPE = "Games where the player's OWN deck had this card."
 SCORE = {"win": 1.0, "draw": 0.5, "loss": 0.0}
 MEANINGFUL_GAIN = 0.02  # with huge samples, tiny differences clear the margin but don't matter
 MIN_CANDIDATE_PLAYERS = 100  # fewer, and one strong player can make a card look good
@@ -35,6 +50,13 @@ def _cards(a: Analyzer) -> dict[int, dict[str, Any]]:
         }
         for r in rows
     }
+
+
+def playable_cards(a: Analyzer) -> list[dict[str, Any]]:
+    """Every card that can go in a deck, alphabetically."""
+    tower = {r["card_id"] for r in a.cards().iter_rows(named=True) if r["is_support"]}
+    every = _cards(a).values()
+    return sorted((c for c in every if c["id"] not in tower), key=lambda c: c["name"])
 
 
 # The API's evolutionLevel for a card in a battle. 3 only occurs on cards with both modes.
@@ -61,7 +83,8 @@ def games(a: Analyzer, tag: str) -> list[Game]:
         f"""SELECT b.id AS battle_id, b.battle_time, b.battle_type, me.result, me.crowns,
                    me.opponent_crowns, me.trophy_change, me.starting_trophies,
                    me.elixir_leaked, me.deck_key,
-                   o.name AS opponent, o.deck_key AS opponent_deck
+                   o.name AS opponent, o.deck_key AS opponent_deck,
+                   o.starting_trophies AS opponent_trophies
             FROM battle_participants me
             JOIN battles b ON b.id = me.battle_id
             JOIN battle_participants o ON o.battle_id = me.battle_id AND o.side <> me.side
@@ -161,7 +184,13 @@ def wins_and_losses(items: list[Game]) -> dict[str, Any]:
         vals = [g[f] for g in rows if g[f] is not None]
         return round(sum(vals) / len(vals), 2) if vals else None
 
+    def leaked(rows: list[Game]) -> float | None:
+        """The typical game, so a few blowouts don't drag the figure up."""
+        vals = [g["elixir_leaked"] for g in rows if g["elixir_leaked"] is not None]
+        return round(median(vals), 2) if vals else None
+
     close = [g for g in items if abs(g["crowns"] - g["opponent_crowns"]) == 1]
+    blowouts = [g for g in losses if g["opponent_crowns"] == 3]
     return {
         "wins": len(wins),
         "losses": len(losses),
@@ -170,29 +199,206 @@ def wins_and_losses(items: list[Game]) -> dict[str, Any]:
         "three_crowned_losses": sum(g["opponent_crowns"] == 3 for g in losses),
         "crowns_for": avg(items, "crowns"),
         "crowns_against": avg(items, "opponent_crowns"),
-        "elixir_leaked_wins": avg(wins, "elixir_leaked"),
-        "elixir_leaked_losses": avg(losses, "elixir_leaked"),
+        "elixir_leaked_wins": leaked(wins),
+        "elixir_leaked_losses": leaked(losses),
+        "elixir_leaked_close_wins": leaked([g for g in close if g["result"] == "win"]),
+        "elixir_leaked_close_losses": leaked([g for g in close if g["result"] == "loss"]),
+        "elixir_leaked_three_crowned": leaked(blowouts),
     }
 
 
-def _family(a: Analyzer, tag: str, mine: list[int]) -> pl.DataFrame:
-    """Other players' recent decks sharing 4-7 cards with this deck."""
-    return (
-        a.decks()
-        .filter(pl.col("player_tag") != tag)
-        .with_columns(shared=pl.col("cards").list.set_intersection(mine).list.len())
-        .filter(pl.col("shared").is_between(4, 7))
+def _same_deck_games(older: list[Game], newer: list[Game]) -> tuple[list[Game], list[Game]] | None:
+    """The older and newer games of the deck played most in both halves, if one was."""
+
+    def by_deck(games: list[Game]) -> Counter[str]:
+        return Counter(g["deck_key"] for g in games)
+
+    before, after = by_deck(older), by_deck(newer)
+    shared = [k for k in before if min(before[k], after[k]) >= MIN_SAME_DECK_GAMES]
+    if not shared:
+        return None
+    deck = max(shared, key=lambda k: min(before[k], after[k]))
+    return [g for g in older if g["deck_key"] == deck], [g for g in newer if g["deck_key"] == deck]
+
+
+def _games_to_settle(swing: float) -> int:
+    """Total games, split evenly in two, for a change this size to clear the margin of error."""
+    return ceil((1.96 / swing) ** 2)
+
+
+def _lobbies(older: list[Game], newer: list[Game]) -> dict[str, Any] | None:
+    """Did the opponents get tougher? Measured by their trophies when the game started."""
+
+    def typical(games: list[Game]) -> float | None:
+        vals = [g["opponent_trophies"] for g in games if g.get("opponent_trophies")]
+        return median(vals) if vals else None
+
+    before, after = typical(older), typical(newer)
+    if before is None or after is None:
+        return None
+    return {
+        "older": round(before),
+        "newer": round(after),
+        "harder": after - before >= HARDER_LOBBY_TROPHIES,
+    }
+
+
+def _decks_over_time(a: Analyzer, items: list[Game]) -> list[dict[str, Any]]:
+    """Each deck played enough to matter, oldest first."""
+    cards = _cards(a)
+    grouped: defaultdict[str, list[Game]] = defaultdict(list)
+    for g in reversed(items):
+        grouped[g["deck_key"]].append(g)
+    current = current_deck_key(items)
+    return [
+        _record(gs)
+        | {"cards": [cards[c] for c in _ids(key) if c in cards], "current": key == current}
+        for key, gs in grouped.items()
+        if len(gs) >= MIN_DECK_TIMELINE_GAMES
+    ][-MAX_DECK_TIMELINE:]
+
+
+def trend(a: Analyzer, items: list[Game]) -> dict[str, Any]:
+    """Is the player improving? Only a like-for-like comparison, on one deck, can say."""
+    if len(items) < MIN_TREND_GAMES:
+        return {"enough": False, "games": len(items)}
+    half = len(items) // 2
+    newer, older = items[:half], items[half:]
+    same = _same_deck_games(older, newer)
+    first, second = same if same else (older, newer)
+    diff = _rate(second) - _rate(first)
+    margin = 1.96 * (0.25 / len(first) + 0.25 / len(second)) ** 0.5
+    if same is None:
+        verdict = "changed_decks"
+        on_this_deck = sum(g["deck_key"] == current_deck_key(items) for g in items)
+        more_games = max(0, _games_to_settle(SWING_WORTH_SETTLING) - on_this_deck)
+    elif abs(diff) > margin:
+        verdict, more_games = ("improving" if diff > 0 else "slipping"), 0
+    else:
+        verdict = "steady"
+        needed = _games_to_settle(abs(diff)) if abs(diff) >= SMALLEST_SWING else None
+        more_games = max(0, needed - len(first) - len(second)) if needed else None
+    days: defaultdict[str, list[Game]] = defaultdict(list)
+    for g in first + second:
+        days[g["battle_time"][:10]].append(g)
+
+    def period(rows: list[Game]) -> dict[str, Any]:
+        return _record(rows) | {"net_trophies": sum(g["trophy_change"] or 0 for g in rows)}
+
+    return {
+        "enough": True,
+        "same_deck": same is not None,
+        "older": period(first),
+        "newer": period(second),
+        "diff": round(diff, 3),
+        "verdict": verdict,
+        "more_games": more_games,
+        "lobbies": _lobbies(older, newer),
+        "decks": _decks_over_time(a, items),
+        "current_streak": _streak(items),
+        "days": [
+            {"day": day, "games": len(gs), "wins": sum(g["result"] == "win" for g in gs)}
+            for day, gs in sorted(days.items())
+        ][-7:],
+    }
+
+
+def elixir_standing(a: Analyzer, items: list[Game]) -> dict[str, Any]:
+    """How this deck's cost compares with every deck played, and how each cost range does."""
+    key = current_deck_key(items)
+    if key is None:
+        return {"error": "This player has no recent games."}
+    cost = {c: e for c, e in a._elixir().items() if e is not None}
+    mine = sum(cost[c] for c in _ids(key) if c in cost) / 8
+
+    def table() -> pl.DataFrame:
+        each = pl.element().replace_strict(cost, default=None, return_dtype=pl.Float64)
+        return (
+            a.decks()
+            .with_columns(avg=pl.col("cards").list.eval(each).list.mean())
+            .group_by("avg")
+            .agg(games=pl.len(), wins=pl.col("score").sum())
+        )
+
+    costs = a._cached("elixir_table", table)
+    total = int(costs["games"].sum()) or 1
+    bands = (
+        costs.with_columns(start=(pl.col("avg") * 2).floor() / 2)
+        .group_by("start")
+        .agg(pl.col("games").sum(), pl.col("wins").sum())
+        .filter(pl.col("games") >= 0.01 * total)
+        .with_columns(win_rate=(pl.col("wins") / pl.col("games")).round(3))
+        .sort("start")
+        .to_dicts()
     )
+    mine_start = int(mine * 2) / 2
+    for b in bands:
+        b["yours"] = b["start"] == mine_start
+    ours = next((b for b in bands if b["yours"]), None)
+    best = max((b["win_rate"] for b in bands), default=0.0)
+    return {
+        "avg_elixir": round(mine, 2),
+        "average_deck": round(float((costs["avg"] * costs["games"]).sum()) / total, 2),
+        "higher_than": round(int(costs.filter(pl.col("avg") < mine)["games"].sum()) / total, 3),
+        "bands": bands,
+        "costs_wins": ours is not None and best - ours["win_rate"] > MEANINGFUL_GAIN,
+    }
+
+
+def near_player(decks: pl.DataFrame, items: list[Game]) -> pl.DataFrame | None:
+    """Decks from the player's kind of battle (ladder or ranked) at about their trophies."""
+    latest = next((g for g in items if g["starting_trophies"]), None)
+    if latest is None:
+        return None
+    level = latest["starting_trophies"]
+    band = max(200, level * NEAR_TROPHIES_SHARE)
+    return decks.filter(
+        pl.col("battle_type") == latest["battle_type"],
+        pl.col("starting_trophies").is_between(level - band, level + band),
+    )
+
+
+@dataclass(frozen=True)
+class Family:
+    """Other players' decks comparable to this one, and how strictly they were picked."""
+
+    decks: pl.DataFrame
+    near: bool  # limited to the player's trophy range
+    min_shared: int  # every deck shares at least this many cards
+
+
+def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game]) -> Family:
+    """Comparable decks: near the player's trophies and sharing 5+ cards, when there are enough."""
+
+    def pick() -> Family:
+        others = (
+            a.decks()
+            .filter(pl.col("player_tag") != tag)
+            .with_columns(shared=pl.col("cards").list.set_intersection(mine).list.len())
+            .filter(pl.col("shared").is_between(4, 7))
+        )
+        near = near_player(others, items)
+        is_near = near is not None and near.height >= MIN_FAMILY_DECKS
+        pool = near if is_near and near is not None else others
+        closer = pool.filter(pl.col("shared") >= CLOSE_SHARED_CARDS)
+        if closer.height >= MIN_CLOSE_FAMILY_DECKS:
+            return Family(closer, is_near, CLOSE_SHARED_CARDS)
+        return Family(pool, is_near, 4)
+
+    latest = items[0]["battle_id"] if items else None
+    return a._cached(("family", tag, tuple(sorted(mine)), latest), pick)
 
 
 def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
     """How much comparable evidence there is for this player's current deck."""
-    fam = _family(a, normalize_tag(tag), _ids(current_deck_key(items)))
+    family = _family(a, normalize_tag(tag), _ids(current_deck_key(items)), items)
+    fam = family.decks
     return {
         "battles": fam.height,
         "players": fam["player_tag"].n_unique() if fam.height else 0,
         "days": DEFAULT_SINCE_DAYS,
         "enough": fam.height >= MIN_FAMILY_DECKS,
+        "near": family.near,
     }
 
 
@@ -201,9 +407,10 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
     tag = normalize_tag(tag)
     key = current_deck_key(items)
     if key is None:
-        return {"enough": False, "family_decks": 0}
+        return {"enough": False, "family_decks": 0, "no_games": True}
     mine = _ids(key)
-    fam = _family(a, tag, mine)
+    family = _family(a, tag, mine, items)
+    fam = family.decks
     n, wins = fam.height, float(fam["score"].sum() or 0)
     if n < MIN_FAMILY_DECKS:
         return {"enough": False, "family_decks": n}
@@ -228,8 +435,6 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         return cards[r["card_id"]] | {
             "games": r["games"],
             "players": r["players"],
-            "win_rate_with": round(r["wins"] / r["games"], 3),
-            "win_rate_without": round((wins - r["wins"]) / (n - r["games"]), 3),
             "gain": round(r["gain"], 3),
             "margin": round(r["margin"], 3),
             "real": abs(r["gain"]) > max(r["margin"], MEANINGFUL_GAIN),
@@ -255,8 +460,9 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
     return {
         "enough": True,
         "family_decks": n,
+        "near": family.near,
+        "min_shared_cards": family.min_shared,
         "family_players": fam["player_tag"].n_unique(),
-        "family_win_rate": round(wins / n, 3),
         "yours": yours,
         "candidates": candidates[:4],
         "tested": sum(1 for r in per if r["card_id"] not in mine),
@@ -315,6 +521,7 @@ def nemesis(a: Analyzer, items: list[Game], min_games: int = 3) -> dict[str, Any
     ]
     rows.sort(key=lambda r: (r["win_rate"], -r["games"]))
     return {
+        "scope": AGAINST_SCOPE,
         "overall_win_rate": round(overall, 3),
         "worst": rows[:5],
         "best": rows[::-1][:3],
@@ -327,13 +534,33 @@ def record_against(a: Analyzer, items: list[Game], card: str | int) -> dict[str,
     info = _cards(a)[cid]
     faced = [g for g in items if cid in _ids(g["opponent_deck"])]
     if not faced:
-        return {"card": info["name"], "games": 0, "total_games_checked": len(items)}
+        return {
+            "card": info["name"],
+            "scope": AGAINST_SCOPE,
+            "games": 0,
+            "total_games_checked": len(items),
+        }
     overall, rate = _rate(items), _rate(faced)
     return _record(faced) | {
         "card": info["name"],
+        "scope": AGAINST_SCOPE,
         "overall_win_rate": round(overall, 3),
         "diff": round(rate - overall, 3),
         "real": len(faced) >= MIN_MATCHUP_GAMES and abs(rate - overall) > _margin(len(faced)),
+    }
+
+
+def record_with(a: Analyzer, items: list[Game], card: str | int) -> dict[str, Any]:
+    """The player's record in games where they were running `card` themselves."""
+    cid = a.resolve_card(card)
+    name = _cards(a)[cid]["name"]
+    played = [g for g in items if cid in _ids(g["deck_key"])]
+    if not played:
+        return {"card": name, "scope": WITH_SCOPE, "games": 0, "total_games_checked": len(items)}
+    return _record(played) | {
+        "card": name,
+        "scope": WITH_SCOPE,
+        "overall_win_rate": round(_rate(items), 3),
     }
 
 

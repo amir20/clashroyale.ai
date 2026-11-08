@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import httpx
 
-from crai.analysis import insights
+from crai.analysis import insights, visuals
 from crai.analysis.analytics import Analyzer
 from crai.coach import voice
 from crai.collect.client import ClashClient
@@ -123,10 +123,39 @@ class Service:
             "similar": similar,
             "patterns": patterns,
             "patterns_line": voice.wins_and_losses(patterns),
+            "story": self.story(tag, items),
+            "cards": insights.playable_cards(self.analyzer),
             "questions": [{"id": k, "label": v} for k, v in QUESTIONS.items()],
             "custom_questions_per_day": DAILY_QUESTIONS,
             "ai_enabled": bool(self.settings.openrouter_key),
             "dev": self.settings.dev,
+        }
+
+    def story(self, tag: str, items: list[insights.Game]) -> dict[str, Any]:
+        """The swipeable cards, computed with no AI call. A card with no data is None."""
+        a = self.analyzer
+
+        def usable(view: dict[str, Any]) -> dict[str, Any] | None:
+            return None if "error" in view else view
+
+        trend = usable(visuals.trend_view(a, items))
+        close = usable(visuals.close_games_view(items))
+        worst = usable(visuals.worst_matchups_view(a, items))
+        elixir = usable(visuals.elixir_view(a, items))
+        replace = insights.replace_card(a, tag, items)
+        return {
+            "trend": trend,
+            "close": close,
+            "worst": worst,
+            "elixir": elixir,
+            "replace": replace,
+            "lines": {
+                "trend": voice.trend(trend) if trend else None,
+                "close": voice.close_games(close) if close else None,
+                "worst": voice.worst_matchups(worst) if worst else None,
+                "elixir": voice.elixir(elixir) if elixir else None,
+                "replace": voice.replace_card(replace),
+            },
         }
 
     def answer(self, tag: str, question: QuestionId) -> dict[str, Any]:

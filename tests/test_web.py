@@ -10,7 +10,7 @@ import pytest
 from conftest import ME, battles, profile
 from fastapi.testclient import TestClient
 
-from crai.analysis import insights
+from crai.analysis import insights, visuals
 from crai.analysis.analytics import Analyzer
 from crai.coach import agent, prompts
 from crai.coach.agent import _finished_text
@@ -171,7 +171,12 @@ def test_record_against_any_card(analyzer: Analyzer) -> None:
     assert faced["card"] == "P.E.K.K.A"
     assert faced["games"] == 200
     never = insights.record_against(analyzer, items, "x-bow")
-    assert never == {"card": "X-Bow", "games": 0, "total_games_checked": 200}
+    assert never == {
+        "card": "X-Bow",
+        "scope": insights.AGAINST_SCOPE,
+        "games": 0,
+        "total_games_checked": 200,
+    }
 
 
 @pytest.mark.parametrize("q", ["replace_card", "best_cards", "nemesis", "best_deck"])
@@ -278,8 +283,10 @@ def test_chat_history_reaches_the_model(db_path: Path) -> None:
 def test_overview_shows_similar_battles_and_card_status(db_path: Path) -> None:
     with client(db_path) as c:
         report = events(c.get(f"/api/players/{ME[1:]}/load").text)[-1]["report"]
-    assert set(report["similar"]) == {"battles", "players", "days", "enough"}
+    assert set(report["similar"]) == {"battles", "players", "days", "enough", "near"}
     assert all("status" in card for card in report["overview"]["deck"])
+    assert set(report["story"]) == {"trend", "close", "worst", "elixir", "replace", "lines"}
+    assert report["cards"]
 
 
 @pytest.mark.parametrize(
@@ -300,11 +307,21 @@ def test_cards_show_how_they_were_played(level: int | None, status: str | None, 
         ("show_card_ranking", {"card": "hog", "kind": "pairs"}, "ranking"),
         ("show_card_ranking", {"card": "hog", "kind": "counters"}, "ranking"),
         ("show_deck", {"cards": ["hog"]}, "deck"),
+        ("show_top_cards", {}, "ranking"),
+        ("show_trend", {}, "trend"),
+        ("show_close_games", {}, "close_games"),
+        ("show_elixir", {}, "elixir"),
     ],
 )
 def test_show_tools_become_visuals_built_from_data(
-    db_path: Path, tool: str, args: dict[str, Any], kind: str
+    db_path: Path,
+    tool: str,
+    args: dict[str, Any],
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(visuals, "MIN_DECK_PLAYERS", 1)  # the fixture has only a few players
+    monkeypatch.setattr(visuals, "MAX_TOP3_SHARE", 1.0)
     sent: list[Any] = []
 
     def model(request: httpx.Request) -> httpx.Response:
