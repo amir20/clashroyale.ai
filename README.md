@@ -37,7 +37,11 @@ uv run crai complete hog log "ice spirit"  # finish a partial deck
 uv run crai stats --sort adj_win_rate --top-only
 uv run crai player                         # you (CR_MY_TAG)
 uv run crai my-decks --min-level 15        # proven decks you can build at your levels
-uv run crai sql "select battle_type, count(*) from battles group by 1"
+uv run crai sql "select battle_type, count(*) from battles group by 1"   # SQLite: every table
+uv run crai sql --snapshot "select count(*) from decks where array_contains(cards, 27000013)"  # Parquet: fast
+uv run crai schema                         # SQLite schema with column comments
+uv run crai schema battles                 # one table + sample rows
+uv run crai schema --snapshot              # snapshot tables (decks, cards) + sample rows
 ```
 
 Card names are fuzzy-matched (`pekka`, `xbow`, `mk`, `log`).
@@ -54,7 +58,7 @@ For a long-running **HTTP** server instead: `uv run crai mcp --transport streama
 
 Every tool declares an output schema. Tables come back **columnar** (`{"columns": [...], "rows": [[...]]}`), about half the tokens of a list of objects, with floats rounded and card IDs dropped. Every win rate has a `margin` (95% margin of error), so the model can tell a real difference from noise.
 
-Tools: `db_overview`, `find_card`, `list_cards`, `card_stats`, `card_pairs`, `card_matchups`, `compare_cards`, `top_decks`, `complete_deck`, `player_profile`, `player_cards`, `decks_for_player`, `refresh_player` (live API), `get_schema`, `run_sql` (read-only).
+Tools: `db_overview`, `find_card`, `list_cards`, `card_stats`, `card_pairs`, `card_matchups`, `compare_cards`, `top_decks`, `complete_deck`, `player_profile`, `player_cards`, `decks_for_player`, `refresh_player` (live API), `get_schema`, `run_sql` (read-only SQLite), `run_snapshot_sql` (fast polars SQL over the deck snapshot).
 
 ## How the stats work
 

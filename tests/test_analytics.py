@@ -80,3 +80,18 @@ def test_sql_is_read_only(analyzer: Analyzer) -> None:
     assert analyzer.sql("SELECT count(*) AS n FROM battles")["rows"] == [[200]]
     with pytest.raises(sqlite3.OperationalError):
         analyzer.sql("DELETE FROM battles")
+
+
+def test_snapshot_sql(analyzer: Analyzer) -> None:
+    df = analyzer.snapshot_query(
+        "SELECT count(*) AS n, avg(score) AS wr FROM decks WHERE array_contains(cards, 26000021)"
+    )
+    assert df["n"].item() == 200
+    joined = analyzer.snapshot_query(
+        "SELECT c.name, count(*) AS games"
+        " FROM (SELECT unnest(cards) AS card_id FROM decks) d JOIN cards c USING (card_id)"
+        " GROUP BY c.name ORDER BY games DESC, c.name LIMIT 1"
+    )
+    assert joined.row(0) == ("Fireball", 400)
+    assert set(analyzer.snapshot_schema()) == {"decks", "cards"}
+    assert "CREATE TABLE battles" in (analyzer.table_sql("battles") or "")

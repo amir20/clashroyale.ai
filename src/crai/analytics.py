@@ -138,7 +138,8 @@ class Filters:
     battle_types: only these types (e.g. ("pathOfLegend",)); default = everything competitive.
     since_days: only battles from the last N days.
     deck_selection: 'collection' (normal decks) by default; None to include draft/special modes.
-    min_trophies: subject deck's starting trophies >= N (ladder only; Path of Legend has none).
+    min_trophies: subject deck's starting trophies >= N. Ladder (`trail`) uses trophies; Path of
+      Legend reports its own rating (~2000s) in the same field, so filter battle_types too.
     """
 
     battle_types: tuple[str, ...] | None = None
@@ -765,3 +766,38 @@ class Analyzer:
 
     def schema(self) -> str:
         return db.SCHEMA
+
+    # ------------------------------------------------------------ snapshot SQL
+
+    SNAPSHOT_TABLES = frozendict(
+        decks="one row per player per 1v1 battle with a full 8-card deck (the Parquet snapshot)",
+        cards="card id, name, elixir, rarity, max_level, is_support",
+    )
+
+    def snapshot_query(self, sql: str) -> pl.DataFrame:
+        """Run polars SQL over the snapshot: tables `decks` and `cards`. Milliseconds, not seconds.
+
+        `cards` in `decks` is a list of card ids: filter with `array_contains(cards, <id>)`.
+        """
+        ctx = pl.SQLContext(decks=self._base(), cards=self.cards(), eager=True)
+        return ctx.execute(sql)
+
+    def snapshot_sql(self, sql: str, limit: int = 200) -> SqlResult:
+        df = self.snapshot_query(sql)
+        return {
+            "columns": df.columns,
+            "rows": [list(r) for r in df.head(limit).rows()],
+            "truncated": df.height > limit,
+        }
+
+    def snapshot_schema(self) -> dict[str, str]:
+        return {
+            "decks": ", ".join(f"{k} {v}" for k, v in self._base().schema.items()),
+            "cards": ", ".join(f"{k} {v}" for k, v in self.cards().schema.items()),
+        }
+
+    def table_sql(self, table: str) -> str | None:
+        """CREATE statement for one SQLite table (with its column comments)."""
+        return self.scalar(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        )

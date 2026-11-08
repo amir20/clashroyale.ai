@@ -48,7 +48,9 @@ everyone they played against (two hops out). Use it to answer deck-building ques
   (and players, when given: few players = one person's skill may drive the result).
 - top_only=true restricts to decks played by seed (top-ranked) players: closer to "the meta".
 - Compute counts and rates with tools/run_sql rather than estimating them from raw rows.
-- For anything the tools don't cover, read get_schema then use run_sql (read-only SQLite).
+- For deck/card aggregates the tools don't cover, use run_snapshot_sql (fast, polars SQL over
+  the `decks` and `cards` tables). For levels, evolutions, crowns or player data, read
+  get_schema then use run_sql (read-only SQLite, slower on big aggregates).
 - Card levels are on the in-game scale (16 = max).
 """
 
@@ -356,6 +358,17 @@ def run_sql(query: str, limit: int = 200) -> SqlResult:
     """Run one read-only SQL statement against the SQLite database. Join cards on card_id for
     names. deck_key = sorted card ids joined by '-'. Already columnar."""
     return analyzer.sql(query, limit)
+
+
+@mcp.tool()
+def run_snapshot_sql(query: str, limit: int = 200) -> SqlResult:
+    """Fast SQL (polars dialect) over the deck snapshot: milliseconds where run_sql over SQLite
+    takes seconds. Tables: `decks` (battle_id, player_tag, side, deck_key, starting_trophies,
+    battle_type, deck_selection, battle_time, score 1/0.5/0, cards list of card ids, is_top) and
+    `cards` (card_id, name, elixir, rarity, max_level, is_support). Filter decks by card with
+    `array_contains(cards, <card_id>)`. Use for aggregate deck questions the tools don't cover;
+    use run_sql for levels, evolutions, crowns and player data (SQLite only)."""
+    return analyzer.snapshot_sql(query, limit)
 
 
 def run(transport: str = "stdio", port: int = 8765) -> None:

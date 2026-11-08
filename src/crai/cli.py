@@ -282,9 +282,47 @@ def my_decks(
 
 
 @app.command()
-def sql(query: str, limit: int = 100) -> None:
-    """Run a read-only SQL query."""
-    _show(_analyzer().query(query), limit)
+def sql(
+    query: str,
+    limit: int = 100,
+    snapshot: Annotated[
+        bool,
+        typer.Option(
+            "--snapshot",
+            help="Query the Parquet snapshot with polars SQL (tables: decks, cards): fast",
+        ),
+    ] = False,
+) -> None:
+    """Run a read-only SQL query against SQLite, or the Parquet snapshot with --snapshot."""
+    a = _analyzer()
+    _show(a.snapshot_query(query) if snapshot else a.query(query), limit)
+
+
+@app.command()
+def schema(
+    table: Annotated[str | None, typer.Argument(help="Show one table plus sample rows")] = None,
+    snapshot: Annotated[
+        bool, typer.Option("--snapshot", help="Describe the Parquet snapshot instead")
+    ] = False,
+    rows: Annotated[int, typer.Option(help="Sample rows to show with a table")] = 5,
+) -> None:
+    """Show the database schema, or one table with sample rows."""
+    a = _analyzer()
+    if snapshot:
+        if table and table not in a.SNAPSHOT_TABLES:
+            raise typer.BadParameter(f"Snapshot tables: {', '.join(a.SNAPSHOT_TABLES)}")
+        names = [table] if table else list(a.SNAPSHOT_TABLES)
+        for name in names:
+            print(f"-- {name}: {a.SNAPSHOT_TABLES.get(name, '?')}")
+            _show(a.snapshot_query(f"SELECT * FROM {name} LIMIT {rows}"), rows)
+        return
+    if table is None:
+        print(a.schema())
+        return
+    if (ddl := a.table_sql(table)) is None:
+        raise typer.BadParameter(f"No table named {table!r}. Run `crai schema` to list them.")
+    print(ddl)
+    _show(a.query(f"SELECT * FROM {table} LIMIT ?", (rows,)), rows)
 
 
 @app.command()
