@@ -152,13 +152,15 @@ class CrawlProgress:
         self.progress = Progress(
             SpinnerColumn(),
             TextColumn("[bold]{task.description:<10}"),
-            BarColumn(bar_width=None),
+            BarColumn(bar_width=40),
             MofNCompleteColumn(),
             TextColumn("[cyan]{task.fields[rate]:>4}/s"),
             TextColumn("[dim]eta[/]"),
             TimeRemainingColumn(compact=True),
             console=console,
-            expand=True,
+            # Never fill the full width: a line that reaches the last column wraps in some
+            # terminals, which breaks the live redraw and leaves stale copies of the bars.
+            expand=False,
         )
         self._totals = _Totals()
         self._live = Live(Group(self.progress, self._totals), console=console, refresh_per_second=8)
@@ -176,10 +178,13 @@ class CrawlProgress:
     def depth_started(self, depth: int, to_fetch: int, fresh: int, budget_left: int) -> None:
         self._skipped += fresh
         label = f"depth {depth} {DEPTH_LABEL.get(depth, '')}".strip()
-        self._task = self.progress.add_task(label, total=max(to_fetch, 1), rate="—")
         self._started = time.monotonic()
-        if to_fetch == 0:
-            self.progress.update(self._task, completed=1)
+        if to_fetch == 0:  # everyone at this depth was fetched recently
+            label += " [dim](all fresh)[/]"
+            self.progress.add_task(label, total=1, completed=1, rate="—")
+            self._task = None
+            return
+        self._task = self.progress.add_task(label, total=to_fetch, rate="—")
 
     def player_done(
         self, done: int, battles_new: int, requests: int, throttled: int, failed: int
