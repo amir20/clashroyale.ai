@@ -69,6 +69,7 @@ def test_changing_decks_is_not_called_a_trend(analyzer: Analyzer) -> None:
     assert t["verdict"] == "changed_decks"
     assert [d["games"] for d in t["decks"]] == [30, 30]
     assert t["decks"][-1]["current"]
+    assert (t["decks"][0]["added"], t["decks"][0]["removed"]) == (["Hog Rider"], ["P.E.K.K.A"])
     assert t["more_games"] == insights._games_to_settle(insights.SWING_WORTH_SETTLING) - 30
     assert "changing decks" in voice.trend(t)
 

@@ -8,6 +8,12 @@
   const gain = (x: number) => `${x > 0 ? "+" : ""}${(x * 100).toFixed(1)}`;
   const gainTone = (x: number) => (x > 0 ? "text-success" : x < 0 ? "text-error" : "text-base-content/60");
   const dayLabel = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  const deckLabel = (d: any) =>
+    d.current
+      ? "Your deck now"
+      : d.added.length > 2
+        ? "A very different deck"
+        : `${d.added.join(" and ")} instead of ${d.removed.join(" and ")}`;
   const trends: Record<string, { label: string; tone: string }> = {
     improving: { label: "Trending up", tone: "text-success" },
     slipping: { label: "Trending down", tone: "text-error" },
@@ -121,14 +127,17 @@
     <p class="text-xs text-base-content/60 mt-3">Games where your opponent had each card. You win {pct(v.overall_win_rate)} overall.{v.rows.some((c: any) => !c.real) ? " Faded cards: too few games to be sure." : ""}</p>
   {:else if v.type === "trend"}
     {#if v.verdict === "changed_decks"}
-      <h4 class="text-sm font-semibold mb-3">Your decks, oldest first</h4>
-      <ul class="space-y-3">
+      <h4 class="text-sm font-semibold mb-3">Decks you've played, oldest first</h4>
+      <ul class="space-y-3.5">
         {#each v.decks as d, i (i)}
           <li>
-            <div class="grid grid-cols-8 gap-0.5 max-w-64">{#each d.cards as c (c.id)}<CardTile card={c} />{/each}</div>
-            <div class="flex justify-between text-xs mt-1 max-w-64">
-              <span class="stat-num">{d.wins}–{d.losses}</span>
-              <span class="text-base-content/60">{d.current ? "Playing now · " : ""}{pct(d.win_rate)}</span>
+            <div class="flex items-baseline justify-between gap-3 text-sm">
+              <span class="min-w-0 {d.current ? 'font-semibold text-primary' : ''}">{deckLabel(d)}</span>
+              <span class="stat-num shrink-0">{d.wins}–{d.losses}</span>
+            </div>
+            <div class="flex h-1.5 gap-0.5 mt-1.5 rounded-full overflow-hidden" aria-hidden="true">
+              {#if d.wins}<div class="bg-success" style="width: {(d.wins / d.games) * 100}%"></div>{/if}
+              <div class="flex-1 bg-error"></div>
             </div>
           </li>
         {/each}
