@@ -18,7 +18,7 @@ from typing import Any, Literal, TypedDict
 
 lazy import polars as pl
 
-from . import db
+from . import db, snapshot
 from .api import normalize_tag
 
 # Battle types that don't reflect real deck strength.
@@ -52,24 +52,24 @@ class DeckResult(TypedDict):
     games: int
     win_rate: float
     adj_win_rate: float
+    margin: float
     players: int
     top_players: int
-    card_ids: list[int]
 
 
 class PlayerDeckResult(TypedDict):
     cards: list[str]
-    your_levels: dict[str, int]
+    levels: list[int]  # your in-game level for each card, same order as `cards`
     avg_level: float
     avg_elixir: float | None
     games: int
     win_rate: float
     adj_win_rate: float
+    margin: float
 
 
 class PairsSummary(TypedDict):
     card: str
-    card_id: int
     decks_with_card: int
     use_rate: float
     win_rate: float | None
@@ -96,6 +96,7 @@ class CompareResult(TypedDict):
     b: str
     games: int
     a_win_rate: float | None
+    margin: float
 
 
 class UsedDeck(TypedDict):
@@ -169,11 +170,21 @@ def _adj(wins: pl.Expr, games: pl.Expr) -> pl.Expr:
     return (wins + 0.5 * PRIOR_GAMES) / (games + PRIOR_GAMES)
 
 
+def _margin(games: int) -> float:
+    """95% margin of error on a win rate from `games` games (worst case p = 0.5)."""
+    return round(1.96 * (0.25 / games) ** 0.5, 3) if games else 1.0
+
+
 def _with_rates(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(
         win_rate=pl.col("wins") / pl.col("games"),
         adj_win_rate=_adj(pl.col("wins"), pl.col("games")),
+        margin=1.96 * (0.25 / pl.col("games")).sqrt(),
     )
+
+
+def _r(x: float | None) -> float | None:
+    return None if x is None else round(x, 3)
 
 
 def _mean(df: pl.DataFrame, col: str = "score") -> float | None:
@@ -187,44 +198,43 @@ def records(df: pl.DataFrame, limit: int | None = None) -> list[Row]:
     return df.with_columns(pl.col(pl.Float64, pl.Float32).round(3)).to_dicts()
 
 
-def _decks_schema() -> frozendict[str, pl.DataType]:
-    # A function, not a module constant, so `lazy import polars` stays lazy until first query.
-    return frozendict(
-        battle_id=pl.String(),
-        player_tag=pl.String(),
-        side=pl.Int64(),
-        deck_key=pl.String(),
-        starting_trophies=pl.Int64(),
-        battle_type=pl.String(),
-        battle_time=pl.String(),
-        is_top=pl.Int64(),
-        score=pl.Float64(),
-        cards=pl.List(pl.Int64()),
-    )
-
-
 class Analyzer:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self._cache: dict[Hashable, Any] = {}
+        self._base_key: tuple[int, int] | None = None
+        self._base_df: pl.DataFrame | None = None
 
     # ------------------------------------------------------------ plumbing
 
-    def _version(self) -> tuple[float, float]:
-        wal = self.db_path.with_name(self.db_path.name + "-wal")
-        return (
-            self.db_path.stat().st_mtime if self.db_path.exists() else 0.0,
-            wal.stat().st_mtime if wal.exists() else 0.0,
-        )
+    def _base(self) -> pl.DataFrame:
+        """All deck appearances from the Parquet snapshot (synced first), with `is_top`.
+
+        Cached until the snapshot covers new battles or the set of seed players changes.
+        """
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"No database at {self.db_path}. Run `crai crawl` first.")
+        snapshot.sync(self.db_path)
+        with self.session() as conn:
+            seeds = tuple(r[0] for r in conn.execute("SELECT tag FROM players WHERE is_seed = 1"))
+        key = (snapshot.covered_rowid(self.db_path), hash(seeds))
+        if key != self._base_key or self._base_df is None:
+            _, raw = snapshot.read(self.db_path)
+            # rechunk: Parquet parts arrive as several chunks, which makes list ops ~3x slower.
+            self._base_df = raw.with_columns(
+                is_top=pl.col("player_tag").is_in(seeds).cast(pl.Int8())
+            ).rechunk()
+            self._base_key = key
+            self._cache.clear()
+        return self._base_df
 
     def _cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
-        """Memoize per DB version, so new crawl data invalidates the cache."""
-        full = (key, self._version())
-        if full not in self._cache:
+        """Memoize until the snapshot changes (`_base` clears this cache)."""
+        if key not in self._cache:
             if len(self._cache) > 32:
                 self._cache.clear()
-            self._cache[full] = fn()
-        return self._cache[full]
+            self._cache[key] = fn()
+        return self._cache[key]
 
     def session(self) -> AbstractContextManager[sqlite3.Connection]:
         if not self.db_path.exists():
@@ -325,52 +335,31 @@ class Analyzer:
             "games": r["games"],
             "win_rate": round(r["win_rate"], 3),
             "adj_win_rate": round(r["adj_win_rate"], 3),
+            "margin": _margin(r["games"]),
             "players": r["players"],
             "top_players": r["top_players"],
-            "card_ids": r["cards"],
         }
 
     # ------------------------------------------------------------ deck appearances
 
     def decks(self, f: Filters = DEFAULT_FILTERS) -> pl.DataFrame:
         """One row per (battle, player) with an 8-card deck in a 1v1 battle."""
-        return self._cached(("decks", f), lambda: self._load_decks(f))
+        base = self._base()
+        return self._cached(("decks", f), lambda: self._filter(base, f))
 
-    def _load_decks(self, f: Filters) -> pl.DataFrame:
-        where = ["b.team_size = 1", "bp.deck_key IS NOT NULL", "bp.result IS NOT NULL"]
-        params: list[object] = []
-        types = f.battle_types or EXCLUDED_TYPES
-        op = "IN" if f.battle_types else "NOT IN"
-        where.append(f"coalesce(b.battle_type, '') {op} ({','.join('?' * len(types))})")
-        params += types
+    @staticmethod
+    def _filter(d: pl.DataFrame, f: Filters) -> pl.DataFrame:
+        battle_type = pl.col("battle_type").fill_null("")
+        if f.battle_types:
+            d = d.filter(battle_type.is_in(f.battle_types))
+        else:
+            d = d.filter(~battle_type.is_in(EXCLUDED_TYPES))
         if f.deck_selection:
-            where.append("coalesce(b.deck_selection, 'collection') = ?")
-            params.append(f.deck_selection)
+            d = d.filter(pl.col("deck_selection").fill_null("collection") == f.deck_selection)
         if f.since_days:
             cutoff = datetime.now(UTC) - timedelta(days=f.since_days)
-            where.append("b.battle_time >= ?")
-            params.append(cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        df = self.query(
-            f"""SELECT bp.battle_id, bp.player_tag, bp.side, bp.result, bp.deck_key,
-                       bp.starting_trophies, b.battle_type, b.battle_time,
-                       coalesce(p.is_seed, 0) AS is_top
-                FROM battle_participants bp
-                JOIN battles b ON b.id = bp.battle_id
-                LEFT JOIN players p ON p.tag = bp.player_tag
-                WHERE {" AND ".join(where)}""",
-            params,
-        )
-        if df.is_empty():
-            return pl.DataFrame(schema=_decks_schema())
-        return df.with_columns(
-            score=pl.when(pl.col("result") == "win")
-            .then(1.0)
-            .when(pl.col("result") == "draw")
-            .then(0.5)
-            .otherwise(0.0),
-            cards=pl.col("deck_key").str.split("-").cast(pl.List(pl.Int64)),
-            starting_trophies=pl.col("starting_trophies").cast(pl.Int64),
-        ).drop("result")
+            d = d.filter(pl.col("battle_time") >= cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return d
 
     def _subject(self, f: Filters, top_only: bool) -> pl.DataFrame:
         d = self.decks(f)
@@ -417,6 +406,7 @@ class Analyzer:
             "use_rate",
             "win_rate",
             "adj_win_rate",
+            "margin",
         ]
         return self._named(s).select(cols).sort(sort_by, descending=descending)
 
@@ -461,13 +451,12 @@ class Analyzer:
             .filter(pl.col("games") >= min_games)
         )
         cols = ["name", "card_id", "elixir", "games", "pair_rate", "lift"]
-        cols += ["win_rate", "adj_win_rate", "synergy"]
+        cols += ["win_rate", "adj_win_rate", "synergy", "margin"]
         summary: PairsSummary = {
             "card": self.card_names()[cid],
-            "card_id": cid,
             "decks_with_card": n_x,
-            "use_rate": n_x / total,
-            "win_rate": wr_x,
+            "use_rate": round(n_x / total, 4),
+            "win_rate": _r(wr_x),
             "total_decks_analyzed": d.height,
         }
         return summary, self._named(p).select(cols).sort(sort_by, descending=True)
@@ -510,11 +499,12 @@ class Analyzer:
             "win_rate",
             "adj_win_rate",
             "delta",
+            "margin",
         )
         summary: MatchupSummary = {
             "card": self.card_names()[cid],
             "decks_with_card": subject.height,
-            "overall_win_rate": wr_x,
+            "overall_win_rate": _r(wr_x),
             "note": "win_rate = how often the deck WITH the card wins vs opponent_card",
         }
         return summary, m.sort("adj_win_rate", descending=mode == "favorable")
@@ -573,11 +563,11 @@ class Analyzer:
             .filter(pl.col("games") >= min_games)
             .sort("adj_win_rate", descending=True)
         )
-        cols = ["name", "elixir", "games", "pair_rate", "win_rate", "adj_win_rate"]
+        cols = ["name", "elixir", "games", "pair_rate", "win_rate", "adj_win_rate", "margin"]
         return {
             "given": self._deck_names(ids),
             "matching_decks": n,
-            "win_rate_with_given": _mean(d),
+            "win_rate_with_given": _r(_mean(d)),
             "suggested_cards": records(self._named(cand).select(cols), limit),
             "full_decks": self.top_decks(
                 f, include=ids, top_only=top_only, min_games=max(3, min_games // 3), limit=10
@@ -598,7 +588,13 @@ class Analyzer:
         )
         m = has_a.join(opp_b, on="battle_id").filter(pl.col("side") != pl.col("opp_side"))
         names = self.card_names()
-        return {"a": names[ia], "b": names[ib], "games": m.height, "a_win_rate": _mean(m)}
+        return {
+            "a": names[ia],
+            "b": names[ib],
+            "games": m.height,
+            "a_win_rate": _r(_mean(m)),
+            "margin": _margin(m.height),
+        }
 
     # ------------------------------------------------------------ players
 
@@ -720,12 +716,13 @@ class Analyzer:
             out.append(
                 {
                     "cards": card_names,
-                    "your_levels": dict(zip(card_names, lv, strict=True)),
+                    "levels": lv,
                     "avg_level": round(sum(lv) / len(lv), 2),
                     "avg_elixir": self._avg_elixir(r["cards"]),
                     "games": r["games"],
                     "win_rate": round(r["win_rate"], 3),
                     "adj_win_rate": round(r["adj_win_rate"], 3),
+                    "margin": _margin(r["games"]),
                 }
             )
         return out

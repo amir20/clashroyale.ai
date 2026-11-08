@@ -13,7 +13,7 @@ import typer
 lazy import polars as pl
 
 from .config import Settings, get_settings
-lazy from . import db
+lazy from . import db, snapshot
 lazy from .analytics import Analyzer, CardSort, DeckSort, Filters, PairSort
 lazy from .api import ClashClient
 lazy from .crawl import CrawlParams, crawl, sync_cards
@@ -127,6 +127,20 @@ def crawl_cmd(
             typer.echo("Another `crai crawl` is already running; wait for it to finish.", err=True)
             raise typer.Exit(1) from None
         _json(asyncio.run(run()))
+    # Pre-pay the analytics snapshot so the next question doesn't have to.
+    log.info("snapshot: %d rows appended", snapshot.sync(s.db_path))
+
+
+@app.command("snapshot")
+def snapshot_cmd(
+    rebuild: Annotated[bool, typer.Option(help="Delete and rebuild from scratch")] = False,
+) -> None:
+    """Update the Parquet snapshot that analytics reads (normally automatic)."""
+    path = get_settings().db_path
+    if rebuild:
+        snapshot.invalidate(path)
+    added = snapshot.sync(path)
+    print(f"appended {added} rows; covers battles up to rowid {snapshot.covered_rowid(path)}")
 
 
 @app.command()

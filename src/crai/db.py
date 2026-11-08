@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import snapshot
 from .models import ApiBattle, ApiCard, ApiPlayer, BattlePlayer, CardList
 
 # The same battle appears in both players' logs, sometimes with timestamps a second apart.
@@ -56,6 +57,9 @@ CREATE TABLE IF NOT EXISTS players (
     profile_fetched_at   TEXT,
     battlelog_fetched_at TEXT
 );
+
+-- Seed lookups run before every analytics question; keep them off a full scan.
+CREATE INDEX IF NOT EXISTS players_seed ON players(tag) WHERE is_seed = 1;
 
 -- Card collection (levels) as reported by the player profile.
 CREATE TABLE IF NOT EXISTS player_cards (
@@ -161,7 +165,8 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.executescript(SCHEMA)
-        migrate(conn)
+        if migrate(conn):
+            snapshot.invalidate(path)  # it may hold rows the migration deleted
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -185,8 +190,10 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+def migrate(conn: sqlite3.Connection) -> bool:
+    """Upgrade the schema in place. Returns True if any migration ran."""
     version: int = conn.execute("PRAGMA user_version").fetchone()[0]
+    ran = version < SCHEMA_VERSION
     if version < 2:
         # v2: participants_key for timestamp-tolerant dedup; remove existing near-duplicates.
         if "participants_key" not in _columns(conn, "battles"):
@@ -203,6 +210,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
     conn.execute("CREATE INDEX IF NOT EXISTS battles_pkey ON battles(participants_key)")
+    return ran
 
 
 def dedupe_battles(conn: sqlite3.Connection) -> int:

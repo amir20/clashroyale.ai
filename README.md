@@ -50,7 +50,9 @@ By default the server runs over **stdio**: Claude Code launches `crai mcp` as a 
 claude mcp add clash-royale -- uv run --directory /Users/amirraminfar/Workspace/clashroyale.ai crai mcp
 ```
 
-For a long-running **HTTP** server instead: `uv run crai mcp --transport streamable-http --port 8765`, which serves `http://127.0.0.1:8765/mcp`. Every tool declares an output schema (from the TypedDicts in `analytics.py`).
+For a long-running **HTTP** server instead: `uv run crai mcp --transport streamable-http --port 8765`, which serves `http://127.0.0.1:8765/mcp`.
+
+Every tool declares an output schema. Tables come back **columnar** (`{"columns": [...], "rows": [[...]]}`), about half the tokens of a list of objects, with floats rounded and card IDs dropped. Every win rate has a `margin` (95% margin of error), so the model can tell a real difference from noise.
 
 Tools: `db_overview`, `find_card`, `list_cards`, `card_stats`, `card_pairs`, `card_matchups`, `compare_cards`, `top_decks`, `complete_deck`, `player_profile`, `player_cards`, `decks_for_player`, `refresh_player` (live API), `get_schema`, `run_sql` (read-only).
 
@@ -62,12 +64,22 @@ Tools: `db_overview`, `find_card`, `list_cards`, `card_stats`, `card_pairs`, `ca
 - **Matchups**: the win rate of decks *with* the card when the opponent has card Y.
 - `level_normalized` puts levels on the in-game scale (the API reports levels per rarity).
 
+## Analytics snapshot
+
+Analytics doesn't query SQLite directly. Pulling ~1M deck rows out of SQLite takes 2.5–12 s, so they're kept as Parquet in `data/clash.db.snapshot/` (~30 MB, zstd), which loads in milliseconds. SQLite stays the source of truth.
+
+- **Incremental:** each sync appends only battles newer than the snapshot covers, as a new part file. Parts are merged once there are more than 16.
+- **Automatic:** analytics syncs before answering, and `crawl` and `refresh_player` sync right after writing. `uv run crai snapshot --rebuild` rebuilds from scratch.
+- **Safe:** a lock file serializes access across processes (CLI, MCP server, crawler), and parts are written to a temp file then renamed. Migrations that delete battles reset the snapshot.
+- **Seed status** (top player or not) is joined in at load time, because it can change after a battle is stored.
+
 ## Layout
 
 ```
 src/crai/models.py      TypedDicts for the API payloads
 src/crai/api.py         async httpx client (retries, 429 backoff, concurrency limit)
 src/crai/db.py          schema + idempotent ingest
+src/crai/snapshot.py    incremental Parquet snapshot for analytics
 src/crai/crawl.py       BFS crawler
 src/crai/analytics.py   polars analytics
 src/crai/cli.py         typer CLI

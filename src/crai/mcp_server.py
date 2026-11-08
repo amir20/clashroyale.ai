@@ -1,17 +1,21 @@
-"""MCP server exposing the battle database to Claude."""
+"""MCP server exposing the battle database to Claude.
 
-from collections.abc import Sequence
-from typing import TypedDict
+Tabular results are returned columnar (`{"columns": [...], "rows": [[...], ...]}`): about half
+the tokens of a list of objects, since keys aren't repeated on every row. Card ids are dropped
+(names are what the model reasons with) and floats are rounded.
+"""
+
+from collections.abc import Mapping, Sequence
+from typing import Any, TypedDict
 
 from mcp.server.mcpserver import MCPServer
+lazy import polars as pl
 
-from . import db
+from . import db, snapshot
 from .analytics import (
     Analyzer,
     CardSort,
     CompareResult,
-    CompleteDeckResult,
-    DeckResult,
     DeckSort,
     Filters,
     MatchupMode,
@@ -19,8 +23,6 @@ from .analytics import (
     Overview,
     PairSort,
     PairsSummary,
-    PlayerDeckResult,
-    PlayerProfile,
     Row,
     SqlResult,
     records,
@@ -39,15 +41,41 @@ everyone they played against (two hops out). Use it to answer deck-building ques
 - Card names are fuzzy-matched ("pekka", "xbow", "mk", "hog" work). Use find_card if unsure.
 - Stats are over 1v1 battles with normal (collection) decks, excluding friendlies/boat battles,
   unless battle_types is given: "pathOfLegend" = ranked, "trail" = trophy-road ladder.
+- Tables come back columnar: {{"columns": [...], "rows": [[...], ...]}}.
 - win_rate counts draws as half. adj_win_rate is smoothed toward 50% so small samples rank lower;
-  prefer it for ranking and always mention sample size (games).
+  prefer it for ranking. `margin` is the 95% margin of error on win_rate: a difference smaller
+  than the margin may be noise, so say so instead of recommending on it. Always mention games
+  (and players, when given: few players = one person's skill may drive the result).
 - top_only=true restricts to decks played by seed (top-ranked) players: closer to "the meta".
 - Compute counts and rates with tools/run_sql rather than estimating them from raw rows.
 - For anything the tools don't cover, read get_schema then use run_sql (read-only SQLite).
-- Card levels: level_normalized is on the in-game scale (e.g. 14/15/16 max).
+- Card levels are on the in-game scale (16 = max).
 """
 
 mcp = MCPServer(name="clash-royale", instructions=INSTRUCTIONS)
+
+DROP = frozenset({"card_id", "card_ids", "is_support"})
+
+
+class Table(TypedDict):
+    columns: list[str]
+    rows: list[list[Any]]
+
+
+def _round(v: Any) -> Any:
+    return round(v, 3) if isinstance(v, float) else v
+
+
+def table(data: pl.DataFrame | Sequence[Mapping[str, Any]], limit: int | None = None) -> Table:
+    """Columnar, rounded, without ids."""
+    if isinstance(data, pl.DataFrame):
+        data = records(data, limit)
+    elif limit is not None:
+        data = data[:limit]
+    if not data:
+        return {"columns": [], "rows": []}
+    cols = [c for c in data[0] if c not in DROP]
+    return {"columns": cols, "rows": [[_round(r[c]) for c in cols] for r in data]}
 
 
 def _tag(tag: str | None) -> str:
@@ -56,12 +84,30 @@ def _tag(tag: str | None) -> str:
     raise ValueError("No tag given and CR_MY_TAG is not configured.")
 
 
-class PairsResult(PairsSummary):
-    partners: list[Row]
+class PairsResult(TypedDict):
+    summary: PairsSummary
+    partners: Table
 
 
-class MatchupsResult(MatchupSummary):
-    opponent_cards: list[Row]
+class MatchupsResult(TypedDict):
+    summary: MatchupSummary
+    opponent_cards: Table
+
+
+class CompleteDeckResult(TypedDict):
+    given: list[str]
+    matching_decks: int
+    win_rate_with_given: float | None
+    suggested_cards: Table
+    full_decks: Table
+
+
+class PlayerProfileResult(TypedDict):
+    profile: Row
+    current_deck: Table
+    record_by_battle_type: Table
+    most_used_decks: Table
+    recent_battles: Table
 
 
 class RefreshResult(TypedDict):
@@ -86,9 +132,10 @@ def find_card(query: str) -> Row:
 
 
 @mcp.tool()
-def list_cards() -> list[Row]:
-    """All cards in the game (name, id, elixir, rarity, is_support for tower troops)."""
-    return records(analyzer.cards())
+def list_cards() -> Table:
+    """All cards in the game: name, elixir, rarity, max_level (tower troops excluded)."""
+    cards = analyzer.cards()
+    return table(cards.filter(cards["is_support"] == 0))
 
 
 @mcp.tool()
@@ -100,7 +147,7 @@ def card_stats(
     battle_types: Sequence[str] | None = None,
     since_days: int | None = None,
     top_only: bool = False,
-) -> list[Row]:
+) -> Table:
     """Meta overview: usage rate and win rate of every card."""
     df = analyzer.card_stats(
         Filters.of(battle_types, since_days),
@@ -109,7 +156,7 @@ def card_stats(
         sort_by=sort_by,
         descending=not ascending,
     )
-    return records(df, limit)
+    return table(df, limit)
 
 
 @mcp.tool()
@@ -125,9 +172,9 @@ def card_pairs(
     """Which cards pair well with `card`.
 
     pair_rate = share of decks with the card that also run the partner; lift > 1 means
-    deliberately paired (not just generally popular); synergy = partner-deck win rate minus the
-    card's overall win rate. Sort by games for "what do people pair it with", adj_win_rate or
-    synergy for "what works best".
+    deliberately paired (not just generally popular); synergy = win rate of decks with both
+    minus the card's overall win rate. Sort by games for "what do people pair it with",
+    adj_win_rate or synergy for "what works best".
     """
     summary, df = analyzer.card_pairs(
         card,
@@ -136,7 +183,7 @@ def card_pairs(
         min_games=min_games,
         sort_by=sort_by,
     )
-    return {**summary, "partners": records(df, limit)}
+    return {"summary": summary, "partners": table(df, limit)}
 
 
 @mcp.tool()
@@ -150,7 +197,8 @@ def card_matchups(
     top_only: bool = False,
 ) -> MatchupsResult:
     """How decks containing `card` fare against each opponent card. 'counters' = worst
-    matchups first (cards that counter it); 'favorable' = best matchups first."""
+    matchups first (cards that counter it); 'favorable' = best matchups first.
+    delta = win rate vs that card minus the card's overall win rate."""
     summary, df = analyzer.card_matchups(
         card,
         Filters.of(battle_types, since_days),
@@ -158,7 +206,7 @@ def card_matchups(
         min_games=min_games,
         mode=mode,
     )
-    return {**summary, "opponent_cards": records(df, limit)}
+    return {"summary": summary, "opponent_cards": table(df, limit)}
 
 
 @mcp.tool()
@@ -185,9 +233,9 @@ def top_decks(
     battle_types: Sequence[str] | None = None,
     since_days: int | None = None,
     top_only: bool = False,
-) -> list[DeckResult]:
+) -> Table:
     """Best exact 8-card decks, optionally required to include/exclude certain cards."""
-    return analyzer.top_decks(
+    decks = analyzer.top_decks(
         Filters.of(battle_types, since_days),
         include=include,
         exclude=exclude,
@@ -196,6 +244,7 @@ def top_decks(
         sort_by=sort_by,
         limit=limit,
     )
+    return table(decks)
 
 
 @mcp.tool()
@@ -208,27 +257,42 @@ def complete_deck(
     top_only: bool = False,
 ) -> CompleteDeckResult:
     """Given 1-7 cards, suggest which cards winning decks add, plus proven full decks with them."""
-    return analyzer.complete_deck(
+    r = analyzer.complete_deck(
         cards,
         Filters.of(battle_types, since_days),
         top_only=top_only,
         min_games=min_games,
         limit=limit,
     )
+    return {
+        "given": r["given"],
+        "matching_decks": r["matching_decks"],
+        "win_rate_with_given": r["win_rate_with_given"],
+        "suggested_cards": table(r["suggested_cards"]),
+        "full_decks": table(r["full_decks"]),
+    }
 
 
 @mcp.tool()
-def player_profile(tag: str | None = None, recent: int = 15) -> PlayerProfile:
+def player_profile(tag: str | None = None, recent: int = 15) -> PlayerProfileResult:
     """Profile, current deck, record by battle type, most-used decks and recent battles (with
-    both decks). Defaults to the user's own tag."""
-    return analyzer.player_profile(_tag(tag), recent)
+    both decks). Reads the local database: call refresh_player first for live data. Defaults to
+    the user's own tag."""
+    p = analyzer.player_profile(_tag(tag), recent)
+    return {
+        "profile": {k: _round(v) for k, v in p["profile"].items()},
+        "current_deck": table(p["current_deck"]),
+        "record_by_battle_type": table(p["record_by_battle_type"]),
+        "most_used_decks": table(p["most_used_decks"]),
+        "recent_battles": table(p["recent_battles"]),
+    }
 
 
 @mcp.tool()
-def player_cards(tag: str | None = None) -> list[Row]:
+def player_cards(tag: str | None = None) -> Table:
     """A player's card collection with levels (level_normalized = in-game level). Defaults to
     the user."""
-    return records(analyzer.player_cards(_tag(tag)))
+    return table(analyzer.player_cards(_tag(tag)))
 
 
 @mcp.tool()
@@ -240,10 +304,11 @@ def decks_for_player(
     battle_types: Sequence[str] | None = None,
     since_days: int | None = None,
     top_only: bool = False,
-) -> list[PlayerDeckResult]:
-    """Proven decks the player can build entirely from cards they own, with their level per
-    card. min_level restricts to cards at or above that in-game level. Defaults to the user."""
-    return analyzer.decks_for_player(
+) -> Table:
+    """Proven decks the player can build entirely from cards they own. `levels` lists the
+    player's in-game level for each card, in the same order as `cards`. min_level restricts to
+    cards at or above that level. Defaults to the user."""
+    decks = analyzer.decks_for_player(
         _tag(tag),
         Filters.of(battle_types, since_days),
         top_only=top_only,
@@ -251,6 +316,7 @@ def decks_for_player(
         min_level=min_level,
         limit=limit,
     )
+    return table(decks)
 
 
 @mcp.tool()
@@ -270,6 +336,7 @@ async def refresh_player(tag: str | None = None) -> RefreshResult:
         db.upsert_player(conn, profile, is_seed=t == my_tag)
         new = db.ingest_battlelog(conn, battles)
         db.mark_battlelog_fetched(conn, t)
+    snapshot.sync(settings.db_path)  # append the new battles now, not on the next question
     return {
         "tag": t,
         "name": profile.get("name"),
@@ -287,7 +354,7 @@ def get_schema() -> str:
 @mcp.tool()
 def run_sql(query: str, limit: int = 200) -> SqlResult:
     """Run one read-only SQL statement against the SQLite database. Join cards on card_id for
-    names. deck_key = sorted card ids joined by '-'."""
+    names. deck_key = sorted card ids joined by '-'. Already columnar."""
     return analyzer.sql(query, limit)
 
 
