@@ -16,5 +16,5 @@
   "terminal": {
     "detect_venv": { "on": { "directories": [".venv"], "activate_script": "default" } }
   },
-  "file_scan_exclusions": ["**/.git", "**/.venv", "**/__pycache__", "**/.ruff_cache", "data"]
+  "file_scan_exclusions": ["**/.git", "**/.venv", "**/__pycache__", "**/.ruff_cache"]
 }
