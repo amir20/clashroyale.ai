@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from . import db
 from .api import ClashAPIError, ClashClient, normalize_tag
@@ -47,6 +48,16 @@ class FetchResult:
     error: str | None = None
 
 
+class CrawlProgress(Protocol):
+    """Optional live-progress sink (the CLI renders it as progress bars)."""
+
+    def depth_started(self, depth: int, to_fetch: int, fresh: int, budget_left: int) -> None: ...
+
+    def player_done(
+        self, done: int, battles_new: int, requests: int, throttled: int, failed: int
+    ) -> None: ...
+
+
 def _is_fresh(conn: sqlite3.Connection, tag: str, cutoff: str) -> bool:
     row = conn.execute("SELECT battlelog_fetched_at FROM players WHERE tag = ?", (tag,)).fetchone()
     return bool(row and row[0] and row[0] >= cutoff)
@@ -73,7 +84,12 @@ def _discovered(result: FetchResult, *, expand_friendly: bool) -> list[str]:
     return [t for p in players if (t := p.get("tag")) and t != result.tag]
 
 
-async def crawl(client: ClashClient, conn: sqlite3.Connection, params: CrawlParams) -> CrawlStats:
+async def crawl(
+    client: ClashClient,
+    conn: sqlite3.Connection,
+    params: CrawlParams,
+    progress: CrawlProgress | None = None,
+) -> CrawlStats:
     stats = CrawlStats()
     run_id = conn.execute(
         "INSERT INTO crawl_runs (started_at, params, status) VALUES (?, ?, 'running')",
@@ -115,7 +131,9 @@ async def crawl(client: ClashClient, conn: sqlite3.Connection, params: CrawlPara
                     to_fetch.append(t)
                     budget -= 1
             stats.players_skipped_fresh += len(expand_from_db)
-            log.info(
+            if progress:
+                progress.depth_started(depth, len(to_fetch), len(expand_from_db), budget)
+            log.debug(
                 "depth %d: %d to fetch, %d fresh (budget left %d)",
                 depth,
                 len(to_fetch),
@@ -152,14 +170,22 @@ async def crawl(client: ClashClient, conn: sqlite3.Connection, params: CrawlPara
                         conn.execute("RELEASE player")
                         stats.players_failed += 1
                         log.warning("skipping %s: malformed payload", r.tag, exc_info=True)
-                        continue
-                    conn.execute("RELEASE player")
-                    stats.battles_new += new
-                    stats.players_fetched += 1
-                    discovered += _discovered(r, expand_friendly=params.expand_friendly)
+                    else:
+                        conn.execute("RELEASE player")
+                        stats.battles_new += new
+                        stats.players_fetched += 1
+                        discovered += _discovered(r, expand_friendly=params.expand_friendly)
+                if progress:
+                    progress.player_done(
+                        done,
+                        stats.battles_new,
+                        client.requests,
+                        client.throttled,
+                        stats.players_failed,
+                    )
                 if done % 50 == 0:
                     conn.commit()
-                    log.info(
+                    (log.debug if progress else log.info)(
                         "  depth %d: %d/%d players, %d new battles, %d requests, %d throttled",
                         depth,
                         done,

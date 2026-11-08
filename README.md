@@ -30,7 +30,7 @@ That's the only command you need. It's safe to re-run any time, and the analytic
 ## Ask questions (CLI)
 
 ```sh
-uv run crai overview
+uv run crai overview                       # add --json before any command for raw JSON: crai --json overview
 uv run crai pairs "hog rider"              # what pairs with Hog (sort: games|adj_win_rate|lift|synergy)
 uv run crai counters "x-bow"               # opponent cards that beat X-Bow decks
 uv run crai decks --with pekka --without "mega knight" --type pathOfLegend

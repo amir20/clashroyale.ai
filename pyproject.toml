@@ -11,6 +11,7 @@ dependencies = [
     "httpx>=0.28.1",
     "mcp>=2.3.0",
     "polars>=2.1.0",
+    "rich>=15.0.0",
     "typer>=0.28.0",
 ]
 
@@ -41,7 +42,7 @@ select = [
 ignore = [
     "PLR0913",  # analytics functions take many keyword-only filters by design
     "PLR2004",  # magic numbers (thresholds) read fine inline
-    "PLR0915", "PLR0912",
+    "PLR0915", "PLR0912", "PLR0911",  # match-based formatters return per case
     "ANN401",   # JSON payloads are Any at the boundary
     "S608",     # SQL is built from fixed fragments + bound params, never user strings
     "PLR0917",  # CLI/MCP tool params map 1:1 to options

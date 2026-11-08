@@ -1,19 +1,26 @@
-"""`crai` command line: crawl data, then ask questions of it."""
+"""`crai` command line: crawl data, then ask questions of it.
+
+Output is rendered for humans (tables, panels, progress bars). Pass `--json` before the command
+(`crai --json pairs hog`) for machine-readable output instead.
+"""
 
 import asyncio
 import fcntl
 import json
 import logging
 import sys
-from typing import Annotated
+import time
+from collections.abc import Callable
+from typing import Annotated, Any
 
 import typer
 
 # Lazy (PEP 810): `crai crawl` never loads polars, `crai stats` never loads httpx.
 lazy import polars as pl
+lazy from rich.logging import RichHandler
 
 from .config import Settings, get_settings
-lazy from . import db, snapshot
+lazy from . import db, snapshot, ui
 lazy from .analytics import Analyzer, CardSort, DeckSort, Filters, PairSort
 lazy from .api import ClashClient
 lazy from .crawl import CrawlParams, crawl, sync_cards
@@ -21,6 +28,7 @@ lazy from .mcp_server import run as run_mcp
 
 app = typer.Typer(no_args_is_help=True, help="Clash Royale crawler, analytics and MCP server.")
 log = logging.getLogger("crai")
+_state = {"json": False}
 
 # typer inspects these at runtime, so they are plain aliases rather than PEP 695 `type`.
 
@@ -36,22 +44,19 @@ def _analyzer() -> Analyzer:
     return Analyzer(get_settings().db_path)
 
 
-def _show(df: pl.DataFrame, limit: int) -> None:
-    with pl.Config(
-        tbl_rows=limit, tbl_cols=20, fmt_str_lengths=60, tbl_width_chars=200, float_precision=3
-    ):
-        print(df.head(limit))
-
-
-def _json(obj: object) -> None:
-    print(json.dumps(obj, indent=2, default=str))
+def _emit(data: Any, render: Callable[[], None]) -> None:
+    """JSON when --json was given, otherwise the pretty rendering."""
+    if _state["json"]:
+        if isinstance(data, pl.DataFrame):
+            data = data.to_dicts()
+        print(json.dumps(data, indent=2, default=str))
+    else:
+        render()
 
 
 def _require_tokens(s: Settings) -> tuple[str, ...]:
     if not s.api_tokens:
-        raise typer.BadParameter(
-            "CR_API_TOKEN is not set (put one or more, comma-separated, in .env)."
-        )
+        raise typer.BadParameter("CR_API_TOKEN is not set (comma-separated keys, in .env).")
     return s.api_tokens
 
 
@@ -62,13 +67,25 @@ def _my_tag(tag: str | None) -> str:
 
 
 @app.callback()
-def _main(verbose: Annotated[bool, typer.Option("-v", "--verbose")] = False) -> None:
+def _main(
+    verbose: Annotated[bool, typer.Option("-v", "--verbose", help="Debug logging")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable JSON output")] = False,
+) -> None:
+    _state["json"] = as_json
+    handler: logging.Handler = (
+        logging.StreamHandler(sys.stderr)
+        if as_json
+        else RichHandler(console=ui.console, show_path=False, log_time_format="%H:%M:%S")
+    )
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
+        format="%(message)s",
+        handlers=[handler],
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# ---------------------------------------------------------------- data collection
 
 
 @app.command("sync-cards")
@@ -81,7 +98,8 @@ def sync_cards_cmd() -> None:
             with db.session(s.db_path) as conn:
                 return await sync_cards(c, conn)
 
-    print(f"synced {asyncio.run(run())} cards")
+    n = asyncio.run(run())
+    _emit({"cards": n}, lambda: ui.console.print(f"[green]✓[/] synced {n} cards"))
 
 
 @app.command("crawl")
@@ -112,12 +130,23 @@ def crawl_cmd(
         refresh_hours=refresh_hours,
         location=location,
     )
+    live = not _state["json"] and ui.console.is_terminal
 
-    async def run() -> dict[str, object]:
+    async def run() -> dict[str, Any]:
         async with ClashClient(tokens, s.api_base, concurrency=concurrency) as c:
             with db.session(s.db_path) as conn:
-                log.info("synced %d cards", await sync_cards(c, conn))
-                stats = await crawl(c, conn, params)
+                n_cards = await sync_cards(c, conn)
+                log.info(
+                    "synced %d cards · %d API key(s) · %d parallel each",
+                    n_cards,
+                    len(tokens),
+                    concurrency,
+                )
+                if live:
+                    with ui.CrawlProgress() as progress:
+                        stats = await crawl(c, conn, params, progress)
+                else:
+                    stats = await crawl(c, conn, params)
             summary = {k: getattr(stats, k) for k in stats.__slots__}
             return summary | {
                 "requests": c.requests,
@@ -133,9 +162,22 @@ def crawl_cmd(
         except BlockingIOError, PermissionError:  # PEP 758: no parentheses needed
             typer.echo("Another `crai crawl` is already running; wait for it to finish.", err=True)
             raise typer.Exit(1) from None
-        _json(asyncio.run(run()))
+        started = time.monotonic()
+        summary = asyncio.run(run())
+        elapsed = time.monotonic() - started
     # Pre-pay the analytics snapshot so the next question doesn't have to.
-    log.info("snapshot: %d rows appended", snapshot.sync(s.db_path))
+    with ui.console.status("updating analytics snapshot…") if live else _nullcontext():
+        appended = snapshot.sync(s.db_path)
+    summary["snapshot_rows_appended"] = appended
+    _emit(summary, lambda: ui.show(ui.crawl_summary(summary, elapsed)))
+
+
+class _nullcontext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> None:
+        return None
 
 
 @app.command("snapshot")
@@ -146,21 +188,62 @@ def snapshot_cmd(
     path = get_settings().db_path
     if rebuild:
         snapshot.invalidate(path)
-    added = snapshot.sync(path)
-    print(f"appended {added} rows; covers battles up to rowid {snapshot.covered_rowid(path)}")
+    with ui.console.status("syncing snapshot…"):
+        added = snapshot.sync(path)
+    covered = snapshot.covered_rowid(path)
+    _emit(
+        {"appended": added, "covered_rowid": covered},
+        lambda: ui.console.print(
+            f"[green]✓[/] appended {added:,} rows · covers battles up to rowid {covered:,}"
+        ),
+    )
+
+
+# ---------------------------------------------------------------- questions
 
 
 @app.command()
 def overview() -> None:
     """What's in the database."""
-    _json(_analyzer().overview())
+    o = _analyzer().overview()
+
+    def render() -> None:
+        counts: dict[str, Any] = dict(o["counts"])
+        counts["analyzable 1v1 decks"] = o["analyzable_1v1_decks"]
+        span = o["battle_time_span"] or {}
+        counts["battles from"] = span.get("first")
+        counts["battles to"] = span.get("last")
+        ui.show(
+            ui.kv(counts, f"database · {o['db_path']}"),
+            ui.table(o["battle_types"], "battle types"),
+            ui.table(
+                [
+                    {
+                        k: r[k]
+                        for k in (
+                            "id",
+                            "started_at",
+                            "players_fetched",
+                            "battles_new",
+                            "requests",
+                            "status",
+                        )
+                    }
+                    for r in o["recent_crawls"]
+                ],
+                "recent crawls",
+            ),
+        )
+
+    _emit(o, render)
 
 
 @app.command()
 def card(query: str) -> None:
     """Look up a card by (fuzzy) name."""
     a = _analyzer()
-    _show(a.cards().filter(pl.col("card_id") == a.resolve_card(query)), 1)
+    row = a.cards().filter(pl.col("card_id") == a.resolve_card(query))
+    _emit(row, lambda: ui.show(ui.kv(row.to_dicts()[0], "card")))
 
 
 @app.command()
@@ -174,7 +257,8 @@ def stats(
 ) -> None:
     """Card usage and win rates."""
     f = Filters.of(type, since)
-    _show(_analyzer().card_stats(f, top_only=top_only, min_games=min_games, sort_by=sort), limit)
+    df = _analyzer().card_stats(f, top_only=top_only, min_games=min_games, sort_by=sort)
+    _emit(df.head(limit), lambda: ui.show(ui.table(df, f"cards by {sort}", limit=limit)))
 
 
 @app.command()
@@ -191,8 +275,13 @@ def pairs(
     summary, df = _analyzer().card_pairs(
         card, Filters.of(type, since), top_only=top_only, min_games=min_games, sort_by=sort
     )
-    _json(summary)
-    _show(df, limit)
+    _emit(
+        {"summary": summary, "partners": df.head(limit).to_dicts()},
+        lambda: ui.show(
+            ui.kv(summary, f"{summary['card']}"),
+            ui.table(df, f"cards paired with {summary['card']} · by {sort}", limit=limit),
+        ),
+    )
 
 
 @app.command()
@@ -213,8 +302,18 @@ def counters(
         min_games=min_games,
         mode="favorable" if favorable else "counters",
     )
-    _json(summary)
-    _show(df, limit)
+    what = "best matchups" if favorable else "counters"
+    _emit(
+        {"summary": summary, "opponent_cards": df.head(limit).to_dicts()},
+        lambda: ui.show(
+            ui.kv({k: v for k, v in summary.items() if k != "note"}, summary["card"]),
+            ui.table(
+                df,
+                f"{what} for {summary['card']} · win rate of the {summary['card']} deck",
+                limit=limit,
+            ),
+        ),
+    )
 
 
 @app.command()
@@ -238,11 +337,7 @@ def decks(
         sort_by=sort,
         limit=limit,
     )
-    for r in rows:
-        print(
-            f"{r['adj_win_rate']:.3f} adj | {r['win_rate']:.3f} wr | {r['games']:>5} games | "
-            f"{r['avg_elixir']} elx | {', '.join(r['cards'])}"
-        )
+    _emit(rows, lambda: ui.show(ui.table(rows, f"top decks · by {sort}")))
 
 
 @app.command()
@@ -254,17 +349,61 @@ def complete(
     top_only: TopOpt = False,
 ) -> None:
     """Suggest cards to complete a partial deck."""
-    _json(
-        _analyzer().complete_deck(
-            cards, Filters.of(type, since), top_only=top_only, min_games=min_games
-        )
+    r = _analyzer().complete_deck(
+        cards, Filters.of(type, since), top_only=top_only, min_games=min_games
+    )
+    _emit(
+        r,
+        lambda: ui.show(
+            ui.kv(
+                {
+                    "given": r["given"],
+                    "matching decks": r["matching_decks"],
+                    "win rate": r["win_rate_with_given"],
+                },
+                "partial deck",
+                columns=1,
+            ),
+            ui.table(r["suggested_cards"], "cards winning decks add"),
+            ui.table(r["full_decks"], "proven full decks"),
+        ),
     )
 
 
 @app.command()
 def player(tag: TagArg = None) -> None:
     """Player profile, record and recent battles."""
-    _json(_analyzer().player_profile(_my_tag(tag)))
+    p = _analyzer().player_profile(_my_tag(tag))
+
+    def render() -> None:
+        prof = p["profile"]
+        keep = (
+            "name", "tag", "trophies", "best_trophies", "wins", "losses", "clan_name",
+            "arena", "pol_league", "best_pol_league", "battlelog_fetched_at",
+        )  # fmt: skip
+        ui.show(
+            ui.kv({k: prof.get(k) for k in keep}, "player"),
+            ui.table(p["current_deck"], "current deck"),
+            ui.table(p["record_by_battle_type"], "record by mode"),
+            ui.table(p["most_used_decks"], "most used decks"),
+            ui.table(
+                [
+                    {
+                        "time": b["battle_time"],
+                        "mode": b["battle_type"],
+                        "result": b["result"],
+                        "score": f"{b['crowns']}-{b['opponent_crowns']}",
+                        "trophies": b["trophy_change"],
+                        "opponent": b["opponent"],
+                        "opponent deck": b["opponent_deck"],
+                    }
+                    for b in p["recent_battles"]
+                ],
+                "recent battles",
+            ),
+        )
+
+    _emit(p, render)
 
 
 @app.command("my-decks")
@@ -277,15 +416,14 @@ def my_decks(
     top_only: TopOpt = False,
 ) -> None:
     """Proven decks you can build from your collection."""
-    _json(
-        _analyzer().decks_for_player(
-            _my_tag(tag),
-            Filters.of(type, since),
-            top_only=top_only,
-            min_games=min_games,
-            min_level=min_level,
-        )
+    rows = _analyzer().decks_for_player(
+        _my_tag(tag),
+        Filters.of(type, since),
+        top_only=top_only,
+        min_games=min_games,
+        min_level=min_level,
     )
+    _emit(rows, lambda: ui.show(ui.table(rows, "proven decks you can build")))
 
 
 @app.command()
@@ -302,7 +440,9 @@ def sql(
 ) -> None:
     """Run a read-only SQL query against SQLite, or the Parquet snapshot with --snapshot."""
     a = _analyzer()
-    _show(a.snapshot_query(query) if snapshot else a.query(query), limit)
+    df = a.snapshot_query(query) if snapshot else a.query(query)
+    note = f"{df.height:,} rows" + (f" (showing {limit})" if df.height > limit else "")
+    _emit(df.head(limit), lambda: ui.show(ui.table(df, note, limit=limit, hide=())))
 
 
 @app.command()
@@ -319,17 +459,27 @@ def schema(
         if table and table not in a.SNAPSHOT_TABLES:
             raise typer.BadParameter(f"Snapshot tables: {', '.join(a.SNAPSHOT_TABLES)}")
         names = [table] if table else list(a.SNAPSHOT_TABLES)
-        for name in names:
-            print(f"-- {name}: {a.SNAPSHOT_TABLES.get(name, '?')}")
-            _show(a.snapshot_query(f"SELECT * FROM {name} LIMIT {rows}"), rows)
+        samples = {n: a.snapshot_query(f"SELECT * FROM {n} LIMIT {rows}") for n in names}
+        _emit(
+            {
+                "schema": a.snapshot_schema(),
+                "samples": {n: d.to_dicts() for n, d in samples.items()},
+            },
+            lambda: ui.show(
+                *(ui.table(d, f"{n} · {a.SNAPSHOT_TABLES[n]}", hide=()) for n, d in samples.items())
+            ),
+        )
         return
     if table is None:
-        print(a.schema())
+        _emit({"schema": a.schema()}, lambda: ui.show(ui.sql(a.schema())))
         return
     if (ddl := a.table_sql(table)) is None:
         raise typer.BadParameter(f"No table named {table!r}. Run `crai schema` to list them.")
-    print(ddl)
-    _show(a.query(f"SELECT * FROM {table} LIMIT ?", (rows,)), rows)
+    sample = a.query(f"SELECT * FROM {table} LIMIT ?", (rows,))
+    _emit(
+        {"ddl": ddl, "sample": sample.to_dicts()},
+        lambda: ui.show(ui.sql(ddl), ui.table(sample, f"sample rows from {table}", hide=())),
+    )
 
 
 @app.command()

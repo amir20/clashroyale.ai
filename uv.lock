@@ -111,6 +111,7 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "polars" },
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -127,6 +128,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "polars", specifier = ">=2.1.0" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "typer", specifier = ">=0.28.0" },
 ]
 

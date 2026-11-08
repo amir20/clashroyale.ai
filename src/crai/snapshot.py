@@ -128,7 +128,7 @@ def _sync(db_path: Path) -> int:
         latest: int = conn.execute("SELECT coalesce(max(rowid), 0) FROM battles").fetchone()[0]
         start = covered_rowid(db_path)
         if latest < start:  # database was rebuilt or shrunk underneath us
-            log.info("snapshot ahead of database; rebuilding")
+            log.warning("snapshot ahead of database; rebuilding")
             for *_, part in _parts(d):
                 part.unlink()
             start = 0
@@ -136,7 +136,7 @@ def _sync(db_path: Path) -> int:
             return 0
         df = _read_range(conn, start + 1, latest)
     _write(d, start + 1, latest, df)
-    log.info("snapshot: appended %d rows (battles %d..%d)", df.height, start + 1, latest)
+    log.debug("snapshot: appended %d rows (battles %d..%d)", df.height, start + 1, latest)
     if len(_parts(d)) > MAX_PARTS:
         _compact(d)
     return df.height
