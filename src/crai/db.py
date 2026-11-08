@@ -46,6 +46,9 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
         raise LegacySchemaError(path)
     if not read_only:
         conn.executescript(SCHEMA)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(cards)")}
+        if "hero_icon_url" not in columns:  # added after v3 shipped
+            conn.execute("ALTER TABLE cards ADD COLUMN hero_icon_url TEXT")
         if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.row_factory = sqlite3.Row
@@ -97,6 +100,7 @@ def upsert_cards(conn: sqlite3.Connection, payload: CardList) -> int:
             is_support,
             (c.get("iconUrls") or {}).get("medium"),
             (c.get("iconUrls") or {}).get("evolutionMedium"),
+            (c.get("iconUrls") or {}).get("heroMedium"),
             ts,
         )
         for is_support, cards in (
@@ -107,13 +111,14 @@ def upsert_cards(conn: sqlite3.Connection, payload: CardList) -> int:
     ]
     conn.executemany(
         """INSERT INTO cards (id, name, rarity, elixir, max_level, max_evolution_level,
-                              is_support, icon_url, evo_icon_url, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+                              is_support, icon_url, evo_icon_url, hero_icon_url, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
              name=excluded.name, rarity=excluded.rarity, elixir=excluded.elixir,
              max_level=excluded.max_level, max_evolution_level=excluded.max_evolution_level,
              is_support=excluded.is_support, icon_url=excluded.icon_url,
-             evo_icon_url=excluded.evo_icon_url, updated_at=excluded.updated_at""",
+             evo_icon_url=excluded.evo_icon_url, hero_icon_url=excluded.hero_icon_url,
+             updated_at=excluded.updated_at""",
         rows,
     )
     return len(rows)
@@ -379,3 +384,25 @@ def opponents_of(conn: sqlite3.Connection, tag: str) -> list[str]:
         (tag,),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def prune_battles(conn: sqlite3.Connection, days: int) -> int:
+    """Delete battles older than `days`, keeping every battle a seed player was in.
+
+    Seeds are the top players and you, so your own history is never removed. Freed pages are
+    reused by later crawls, so the database file stops growing instead of shrinking.
+    """
+    cutoff = f"-{days} days"
+    old = conn.execute(
+        """SELECT b.id FROM battles b
+           WHERE b.battle_time < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)
+             AND NOT EXISTS (
+               SELECT 1 FROM battle_participants bp JOIN players p ON p.tag = bp.player_tag
+               WHERE bp.battle_id = b.id AND p.is_seed = 1)""",
+        (cutoff,),
+    ).fetchall()
+    ids = [(r[0],) for r in old]
+    conn.executemany("DELETE FROM participant_cards WHERE battle_id = ?", ids)
+    conn.executemany("DELETE FROM battle_participants WHERE battle_id = ?", ids)
+    conn.executemany("DELETE FROM battles WHERE id = ?", ids)
+    return len(ids)

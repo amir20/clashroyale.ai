@@ -57,3 +57,9 @@ def test_snapshot_matches_database(analyzer: Analyzer) -> None:
         " FROM battle_participants"
     )
     assert d["cards"].list.len().unique().to_list() == [8]
+
+
+def test_memory_window_limits_what_is_loaded(db_path: Path) -> None:
+    add_battles(db_path, 1, offset_days=-20)  # an old battle
+    assert snapshot.read(db_path)[1].height == 402
+    assert snapshot.read(db_path, days=7)[1].height == 400

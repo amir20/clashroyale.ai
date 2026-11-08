@@ -121,7 +121,8 @@ def upgrade(path: Path, step: Callable[[str], None] = lambda _: None) -> Upgrade
             report.seconds[label] = time.monotonic() - t0
 
         for t in PLAIN_TABLES:
-            cols = ", ".join(r[1] for r in new.execute(f"PRAGMA table_info({t})"))
+            source = {r[1] for r in new.execute(f"PRAGMA old.table_info({t})")}
+            cols = ", ".join(r[1] for r in new.execute(f"PRAGMA table_info({t})") if r[1] in source)
             run(f"copying {t}", f"INSERT INTO main.{t} ({cols}) SELECT {cols} FROM old.{t}")
         # Old rowids become the new integer ids: same order, so the battle sequence is kept.
         run(

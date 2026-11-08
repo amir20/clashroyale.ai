@@ -14,7 +14,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from typing import Any, Protocol
 
 from . import db
@@ -150,6 +149,78 @@ def _discovered(result: FetchResult, *, expand_friendly: bool) -> list[str]:
     return [t for p in players if (t := p.get("tag")) and t != result.tag]
 
 
+async def _crawl_depth(
+    client: ClashClient,
+    conn: sqlite3.Connection,
+    writer: _Writer,
+    stats: CrawlStats,
+    to_fetch: list[str],
+    depth: int,
+    params: CrawlParams,
+    seed_set: set[str],
+    seed_rank: dict[str, int],
+    progress: CrawlProgress | None,
+) -> tuple[list[str], list[asyncio.Task[None]]]:
+    """Fetch and store one depth with a fixed number of workers.
+
+    A worker finishes saving one player before fetching the next, so only `client.parallelism`
+    players are ever in progress. Without this limit, finished battle logs pile up in memory and
+    the flood of responses starves the writer thread (it made a NAS crawl 20x slower).
+    """
+    discovered: list[str] = []
+    pending = iter(to_fetch)
+    done = submitted = 0
+
+    def finished() -> None:
+        nonlocal done
+        done += 1
+        if progress:
+            progress.player_done(
+                done, stats.battles_new, client.requests, client.throttled, stats.players_failed
+            )
+        elif done % 500 == 0:
+            log.info(
+                "  depth %d: %d/%d players, %d new battles, %d requests, %d throttled",
+                depth,
+                done,
+                len(to_fetch),
+                stats.battles_new,
+                client.requests,
+                client.throttled,
+            )
+
+    async def worker() -> None:
+        nonlocal submitted
+        for tag in pending:  # one shared iterator: each player goes to exactly one worker
+            r = await _fetch(client, tag)
+            if r.error:
+                stats.players_failed += 1
+                log.warning("skipping %s: %s", r.tag, r.error)
+            elif r.profile is None and not r.battles:
+                stats.players_missing += 1
+            else:
+                new = await writer.submit(
+                    _ingest, conn, r, r.tag in seed_set, seed_rank.get(r.tag), depth
+                )
+                if new is None:
+                    stats.players_failed += 1
+                else:
+                    stats.battles_new += new
+                    stats.players_fetched += 1
+                    discovered.extend(_discovered(r, expand_friendly=params.expand_friendly))
+                submitted += 1
+                if submitted % 50 == 0:
+                    writer.submit(conn.commit)
+                await writer.backpressure()
+            finished()
+
+    tasks = [asyncio.create_task(worker()) for _ in range(client.parallelism)]
+    await asyncio.gather(*tasks)
+    writer.submit(conn.commit)
+    await writer.drain()
+    return discovered, tasks
+
+
 async def crawl(
     client: ClashClient,
     conn: sqlite3.Connection,
@@ -178,7 +249,7 @@ async def crawl(
     seen = set(frontier)
     seed_set = set(frontier)
     budget = params.max_players
-    tasks: list[asyncio.Task[FetchResult]] = []
+    tasks: list[asyncio.Task[None]] = []
     status = "error"
 
     try:
@@ -205,65 +276,9 @@ async def crawl(
                 budget,
             )
 
-            discovered: list[str] = []
-            done = 0
-
-            def finished(depth: int = depth, total: int = len(to_fetch)) -> None:
-                nonlocal done
-                done += 1
-                if progress:
-                    progress.player_done(
-                        done,
-                        stats.battles_new,
-                        client.requests,
-                        client.throttled,
-                        stats.players_failed,
-                    )
-                if done % 500 == 0 and not progress:
-                    log.info(
-                        "  depth %d: %d/%d players, %d new battles, %d requests, %d throttled",
-                        depth,
-                        done,
-                        total,
-                        stats.battles_new,
-                        client.requests,
-                        client.throttled,
-                    )
-
-            def ingested(r: FetchResult, found: list[str], fut: asyncio.Future[int | None]) -> None:
-                # Runs on the event loop when the writer thread finishes this player.
-                if fut.cancelled() or fut.exception() is not None:
-                    return  # surfaced by the writer (fatal)
-                if (new := fut.result()) is None:
-                    stats.players_failed += 1
-                else:
-                    stats.battles_new += new
-                    stats.players_fetched += 1
-                    found.extend(_discovered(r, expand_friendly=params.expand_friendly))
-                finished()
-
-            tasks = [asyncio.create_task(_fetch(client, t)) for t in to_fetch]
-            submitted = 0
-            for fut in asyncio.as_completed(tasks):
-                r = await fut
-                if r.error:
-                    stats.players_failed += 1
-                    log.warning("skipping %s: %s", r.tag, r.error)
-                    finished()
-                elif r.profile is None and not r.battles:
-                    stats.players_missing += 1
-                    finished()
-                else:
-                    w = writer.submit(
-                        _ingest, conn, r, r.tag in seed_set, seed_rank.get(r.tag), depth
-                    )
-                    w.add_done_callback(partial(ingested, r, discovered))
-                    submitted += 1
-                    if submitted % 50 == 0:
-                        writer.submit(conn.commit)
-                    await writer.backpressure()
-            writer.submit(conn.commit)
-            await writer.drain()
+            discovered, tasks = await _crawl_depth(
+                client, conn, writer, stats, to_fetch, depth, params, seed_set, seed_rank, progress
+            )
             stats.per_depth[depth] = len(to_fetch)
             if depth == params.depth:
                 break

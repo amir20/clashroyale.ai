@@ -1,0 +1,17 @@
+# Never bake secrets or the database into an image.
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-*
+
+.git/
+.github/
+.zed/
+.venv/
+**/node_modules/
+web/dist/
+tests/
+**/__pycache__/
+**/.ruff_cache/

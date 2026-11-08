@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS cards (
     is_support          INTEGER NOT NULL DEFAULT 0,  -- tower troops
     icon_url            TEXT,
     evo_icon_url        TEXT,
+    hero_icon_url       TEXT,
     updated_at          TEXT
 );
 

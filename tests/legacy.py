@@ -140,7 +140,8 @@ def make_legacy(v3_db: Path, dest: Path, *, version: int = 2) -> None:
         conn.executescript(LEGACY_V2_SCHEMA)
         conn.execute("ATTACH DATABASE ? AS src", (str(v3_db),))
         for t in ("cards", "players", "player_cards", "player_current_deck", "crawl_runs"):
-            conn.execute(f"INSERT INTO main.{t} SELECT * FROM src.{t}")
+            cols = ", ".join(r[1] for r in conn.execute(f"PRAGMA main.table_info({t})"))
+            conn.execute(f"INSERT INTO main.{t} ({cols}) SELECT {cols} FROM src.{t}")
         # Text ids in a deliberately non-sequential order, like real SHA-1s.
         conn.execute(
             """INSERT INTO main.battles (id, battle_time, participants_key, battle_type,

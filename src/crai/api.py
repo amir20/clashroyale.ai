@@ -83,6 +83,7 @@ class ClashClient:
             limits=httpx.Limits(max_connections=concurrency * len(toks) + 4),
         )
         self._max_retries = max_retries
+        self.parallelism = concurrency * len(toks)
 
     @property
     def requests(self) -> int:

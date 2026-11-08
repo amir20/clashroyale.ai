@@ -8,7 +8,9 @@ import asyncio
 import fcntl
 import json
 import logging
+import os
 import sqlite3
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -19,9 +21,10 @@ import typer
 
 # Lazy (PEP 810): `crai crawl` never loads polars, `crai stats` never loads httpx.
 lazy import polars as pl
+lazy import uvicorn
 lazy from rich.logging import RichHandler
 
-from .config import Settings, get_settings
+from .config import PROJECT_ROOT, Settings, get_settings
 from .schema import is_legacy
 lazy from . import db, snapshot, ui
 lazy from .analytics import Analyzer, CardSort, DeckSort, Filters, PairSort
@@ -249,6 +252,21 @@ def upgrade_db() -> None:
                 [{"step": k, "seconds": round(v, 1)} for k, v in report.seconds.items()], "timing"
             ),
         ),
+    )
+
+
+@app.command()
+def prune(days: Annotated[int, typer.Option(help="Delete battles older than this")] = 14) -> None:
+    """Delete old battles to keep the database bounded (top players' and your games are kept)."""
+    with (
+        ui.console.status(f"pruning battles older than {days} days…"),
+        db.session(get_settings().db_path) as conn,
+    ):
+        removed = db.prune_battles(conn, days)
+        db.checkpoint(conn)
+    _emit(
+        {"removed": removed},
+        lambda: ui.console.print(f"[green]✓[/] removed {removed:,} old battles"),
     )
 
 
@@ -561,6 +579,35 @@ def mcp(
 ) -> None:
     """Run the MCP server (stdio by default)."""
     run_mcp(transport, port)
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option(help="Bind address")] = "127.0.0.1",
+    port: int = 8000,
+    reload: Annotated[bool, typer.Option(help="Restart on code changes")] = False,
+) -> None:
+    """Run the Rook web app (API plus the built Svelte UI)."""
+    uvicorn.run("crai.web:create_app", factory=True, host=host, port=port, reload=reload)
+
+
+@app.command()
+def dev(port: int = 8011, web_port: int = 5173) -> None:
+    """Develop locally: hot reload, no rate limits, AI usage printed in the page."""
+    os.environ["CRAI_DEV"] = "1"  # inherited by uvicorn's reload workers
+    command = ["bun", "run", "dev", "--host", "--port", str(web_port), "--strictPort"]
+    web = subprocess.Popen(command, cwd=PROJECT_ROOT / "web")
+    try:
+        uvicorn.run(
+            "crai.web:create_app",
+            factory=True,
+            host="127.0.0.1",
+            port=port,
+            reload=True,
+            reload_dirs=[str(PROJECT_ROOT / "src" / "crai")],
+        )
+    finally:
+        web.terminate()
 
 
 def main() -> None:

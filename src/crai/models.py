@@ -12,6 +12,7 @@ from typing import NotRequired, TypedDict
 class IconUrls(TypedDict, total=False):
     medium: str
     evolutionMedium: str
+    heroMedium: str
 
 
 class ApiCard(TypedDict):

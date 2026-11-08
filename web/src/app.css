@@ -1,0 +1,88 @@
+@import "tailwindcss";
+@plugin "daisyui" { themes: false; logs: false; }
+@plugin "daisyui/theme" {
+  name: "rook";
+  default: true;
+  color-scheme: dark;
+  --color-base-100: #0e1022;
+  --color-base-200: #161932;
+  --color-base-300: #222644;
+  --color-base-content: #f4f1ff;
+  --color-primary: #ffc53d;
+  --color-primary-content: #2a1b00;
+  --color-secondary: #ff6b4a;
+  --color-secondary-content: #2b0a02;
+  --color-accent: #57c7ff;
+  --color-accent-content: #04202e;
+  --color-neutral: #0c0e20;
+  --color-neutral-content: #c9c6e6;
+  --color-info: #57c7ff;
+  --color-info-content: #04202e;
+  --color-success: #5fe38f;
+  --color-success-content: #042912;
+  --color-warning: #ffc53d;
+  --color-warning-content: #2a1b00;
+  --color-error: #ff5d6c;
+  --color-error-content: #2e0307;
+  --radius-selector: 0.5rem;
+  --radius-field: 0.625rem;
+  --radius-box: 0.875rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@theme {
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+}
+
+html { background: var(--color-base-100); -webkit-tap-highlight-color: transparent; }
+body { font-family: var(--font-sans); font-weight: 400; overscroll-behavior-y: none; -webkit-font-smoothing: antialiased; }
+h1, h2 { font-weight: 700; letter-spacing: -0.025em; }
+.stat-num { font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.panel { background: var(--color-base-200); border: 1px solid color-mix(in oklab, var(--color-base-content) 9%, transparent); border-radius: var(--radius-box); }
+/* What Rook says: a clean quote, not a bubble. */
+.says { border-left: 2px solid var(--color-primary); padding-left: 0.875rem; line-height: 1.55; }
+
+/* Chunky game button: pressed state sinks into its shadow. */
+.btn-game {
+  border: 0;
+  box-shadow: 0 3px 0 color-mix(in oklab, var(--color-primary) 55%, black);
+  transition: transform 0.08s, box-shadow 0.08s;
+}
+.btn-game:active:not(:disabled) { transform: translateY(4px); box-shadow: 0 1px 0 color-mix(in oklab, var(--color-primary) 55%, black); }
+
+.sky {
+  background:
+    radial-gradient(60% 40% at 80% 10%, #3a2d7a55, transparent),
+    radial-gradient(50% 35% at 10% 30%, #1f6a8a44, transparent),
+    linear-gradient(#171a3a, #12142b 70%);
+}
+
+/* The Apple move: the hero recedes while the report sheet slides over it. */
+@supports (animation-timeline: scroll()) {
+  .hero-recede {
+    animation: recede linear both;
+    animation-timeline: scroll(root);
+    animation-range: 0 90svh;
+    transform-origin: 50% 30%;
+  }
+  @keyframes recede { to { transform: scale(0.82); opacity: 0; filter: blur(4px); } }
+}
+
+.reveal { opacity: 0; transform: translateY(36px) scale(0.97); transition: opacity 0.6s ease, transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.reveal.in { opacity: 1; transform: none; }
+
+@keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+.shake { animation: shake 0.18s 2; }
+@keyframes pop { from { transform: scale(0.8); opacity: 0; } }
+.pop { animation: pop 0.3s cubic-bezier(0.3, 1.6, 0.5, 1); }
+.dots::after { content: ""; animation: dots 1.2s steps(4) infinite; }
+@keyframes dots { 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .reveal { opacity: 1; transform: none; }
+}

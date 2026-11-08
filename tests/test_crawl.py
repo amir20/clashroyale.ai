@@ -1,5 +1,6 @@
 """End-to-end crawl against a fake API (httpx.MockTransport): no network."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -103,3 +104,25 @@ async def test_malformed_player_is_skipped_not_fatal(tmp_path: Path) -> None:
     assert stats.players_failed == 2  # #99 (HTTP 500) and #88 (malformed)
     assert stats.players_fetched == 1  # #22; #PP is never discovered because #88 was skipped
     assert fetched_88 is None or fetched_88[0] is None  # rolled back, so it's retried next run
+
+
+async def test_only_a_few_players_are_in_progress_at_once(tmp_path: Path) -> None:
+    """Regression: fetching everyone up front buffered huge amounts and starved the writer."""
+    inflight = peak = 0
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        nonlocal inflight, peak
+        inflight += 1
+        peak = max(peak, inflight)
+        await asyncio.sleep(0.001)
+        inflight -= 1
+        return handler(request)
+
+    tags = [f"#{'2' * i}" for i in range(2, 40)]
+    transport = httpx.MockTransport(slow)
+    async with ClashClient("t", "https://api.test/v1", concurrency=2, transport=transport) as c:
+        with db.session(tmp_path / "c.db") as conn:
+            stats = await crawl(c, conn, CrawlParams(top=0, tags=tags, depth=0))
+    assert stats.players_fetched == len(tags)
+    assert c.parallelism == 2
+    assert peak <= 2  # the per-key limit still holds

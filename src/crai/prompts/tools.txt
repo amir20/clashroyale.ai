@@ -1,0 +1,11 @@
+# Tools Rook can call. Format: name | status shown to the player | description for the model
+get_overview | your overview | The player's profile, current deck and recent record. Each card's `status` says if it was played as an evolution or a hero. The data doesn't say what those abilities do, so don't describe them.
+get_patterns | your wins and losses | Crowns, close games and elixir leaked in wins vs losses.
+which_card_to_replace | your deck against similar decks | How OTHER players' decks similar to this player's do with and without each card, plus candidates to swap in. These win rates are not the player's own: say "decks like yours", never "you win". A card missing from the candidates simply did not stand out.
+cards_vs_other_players | your cards against other players | The player's win rate with each card vs all players.
+opponent_cards_that_beat_me | your worst matchups | Only the opponent cards the player does worst and best against. For one specific card, use my_record_against_card.
+my_record_against_card | that matchup | The player's own record when the opponent's deck contains a specific card. Use for any question about how they do against a card.
+my_decks_compared | your decks | The player's decks with records.
+best_partners_for_card | what pairs with that card | Cards that pair best with a card, across all players.
+counters_for_card | what counters that card | Opponent cards that beat decks with a card, across all players.
+top_decks_with_cards | the best decks with those cards | Best decks containing cards, across all players.

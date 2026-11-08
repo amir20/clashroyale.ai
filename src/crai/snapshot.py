@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing, contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 lazy import polars as pl
@@ -157,7 +158,7 @@ def _compact(d: Path) -> None:
         p.unlink(missing_ok=True)
 
 
-def read(db_path: Path) -> tuple[int, pl.DataFrame]:
+def read(db_path: Path, days: int = 0) -> tuple[int, pl.DataFrame]:
     """Sync, then return (covered rowid, all deck appearances)."""
     with _locked(db_path):
         _sync(db_path)
@@ -167,4 +168,8 @@ def read(db_path: Path) -> tuple[int, pl.DataFrame]:
             return 0, empty.with_columns(
                 score=pl.lit(None, pl.Float64()), cards=pl.lit(None, pl.List(pl.Int64()))
             )
-        return parts[-1][1], pl.read_parquet([p for *_, p in parts])
+        scan = pl.scan_parquet([p for *_, p in parts])
+        if days:  # keep long-running servers from loading every battle ever crawled
+            cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            scan = scan.filter(pl.col("battle_time") >= cutoff)
+        return parts[-1][1], scan.collect()

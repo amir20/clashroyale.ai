@@ -205,8 +205,9 @@ def records(df: pl.DataFrame, limit: int | None = None) -> list[Row]:
 
 
 class Analyzer:
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, window_days: int = 0) -> None:
         self.db_path = Path(db_path)
+        self.window_days = window_days  # 0 = load every battle in the snapshot
         self._cache: dict[Hashable, Any] = {}
         self._base_key: tuple[int, int] | None = None
         self._base_df: pl.DataFrame | None = None
@@ -225,7 +226,7 @@ class Analyzer:
             seeds = tuple(r[0] for r in conn.execute("SELECT tag FROM players WHERE is_seed = 1"))
         key = (snapshot.covered_rowid(self.db_path), hash(seeds))
         if key != self._base_key or self._base_df is None:
-            _, raw = snapshot.read(self.db_path)
+            _, raw = snapshot.read(self.db_path, self.window_days)
             # rechunk: Parquet parts arrive as several chunks, which makes list ops ~3x slower.
             self._base_df = raw.with_columns(
                 is_top=pl.col("player_tag").is_in(seeds).cast(pl.Int8())

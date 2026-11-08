@@ -1,9 +1,10 @@
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from conftest import ME, battles, flipped
+from conftest import ME, battle, battles, flipped
 from legacy import make_legacy
 
 from crai import db
@@ -12,6 +13,8 @@ from crai.api import normalize_tag
 from crai.models import ApiPlayer
 from crai.schema import SCHEMA_VERSION, LegacySchemaError
 from crai.upgrade import upgrade
+
+START_OLD = datetime.now(UTC) - timedelta(days=40)
 
 
 def count(path: Path, table: str) -> int:
@@ -140,3 +143,18 @@ def test_explicit_nulls_from_api(db_path: Path) -> None:
         db.upsert_cards(conn, {"items": None, "supportItems": None})
         assert db.ingest_battle(conn, flipped(b, shift_seconds=600))
     assert count(db_path, "battles") == 201
+
+
+def test_prune_keeps_recent_and_seed_battles(db_path: Path) -> None:
+    with db.session(db_path) as conn:
+        old = START_OLD
+        kept = battle(old, ME, "#Q8", a_wins=True)  # ME is a seed: kept however old
+        gone = battle(old, "#QQ", "#Q8", a_wins=True)
+        assert db.ingest_battlelog(conn, [kept, gone]) == 2
+        before = count_rows(conn, "participant_cards")
+        assert db.prune_battles(conn, 14) == 1
+        assert count_rows(conn, "participant_cards") == before - 16
+
+
+def count_rows(conn: sqlite3.Connection, table: str) -> int:
+    return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
