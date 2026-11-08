@@ -160,12 +160,13 @@ async def crawl(client: ClashClient, conn: sqlite3.Connection, params: CrawlPara
                 if done % 50 == 0:
                     conn.commit()
                     log.info(
-                        "  depth %d: %d/%d players, %d new battles so far, %d requests",
+                        "  depth %d: %d/%d players, %d new battles, %d requests, %d throttled",
                         depth,
                         done,
                         len(to_fetch),
                         stats.battles_new,
                         client.requests,
+                        client.throttled,
                     )
             conn.commit()
             stats.per_depth[depth] = len(to_fetch)

@@ -13,7 +13,9 @@ uv sync
 cp .env.example .env   # then fill in CR_API_TOKEN and CR_MY_TAG
 ```
 
-To get a token, create a key at <https://developer.clashroyale.com> and whitelist your **public IP** on it (`curl https://api.ipify.org`). If your IP changes often, you can use the RoyaleAPI proxy: whitelist `45.79.218.79` on the key and set `CR_API_BASE=https://proxy.royaleapi.dev/v1`.
+To get a token, create a key at <https://developer.clashroyale.com> and whitelist your **public IP** on it (`curl https://api.ipify.org`). **More keys = faster crawls.** Put several keys in `CR_API_TOKEN`, comma-separated (all whitelisting the same IP). Each key gets its own lane of `--concurrency` parallel requests (default 8). A key that gets rate-limited (429) rests on its own while the others continue, and a key that's rejected (403) is disabled with a warning. Each crawl's summary shows requests and 429s per key.
+
+If your IP changes often, you can use the RoyaleAPI proxy: whitelist `45.79.218.79` on the key and set `CR_API_BASE=https://proxy.royaleapi.dev/v1`.
 
 ## Collect data
 
@@ -89,6 +91,7 @@ Limits and rules:
 - `--max-players` caps how many players get fetched from the API in one run.
 - A player fetched within `--refresh-hours` (default 12) is **not fetched again**. Their opponents are still found in the database, so the crawl keeps expanding through them.
 - Friendly battles don't count as connections when deciding who to crawl next.
+- Requests are spread across all your API keys (see [Setup](#setup)).
 - If one player's request fails (a timeout or 500) or their data is malformed, that player is skipped and retried next run. A **403** (bad token or IP) stops the crawl immediately.
 - Only one crawl can run at a time (`data/.crawl.lock`).
 

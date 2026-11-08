@@ -21,7 +21,7 @@ def _load_dotenv(path: Path) -> None:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    api_token: str | None
+    api_tokens: tuple[str, ...]  # one or more keys, comma-separated in the env var
     api_base: str
     db_path: Path
     my_tag: str | None
@@ -33,7 +33,13 @@ def get_settings() -> Settings:
     _load_dotenv(PROJECT_ROOT / ".env")
     db = os.environ.get("CR_DB_PATH") or str(PROJECT_ROOT / "data" / "clash.db")
     return Settings(
-        api_token=os.environ.get("CR_API_TOKEN") or None,
+        api_tokens=tuple(
+            tok.strip()
+            for tok in (
+                os.environ.get("CR_API_TOKENS") or os.environ.get("CR_API_TOKEN") or ""
+            ).split(",")
+            if tok.strip()
+        ),
         api_base=(os.environ.get("CR_API_BASE") or DEFAULT_API_BASE).rstrip("/"),
         db_path=Path(db).expanduser(),
         my_tag=os.environ.get("CR_MY_TAG") or None,

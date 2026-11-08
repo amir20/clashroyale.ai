@@ -326,9 +326,9 @@ async def refresh_player(tag: str | None = None) -> RefreshResult:
     """Fetch a player's latest profile and battle log from the live API into the database
     (e.g. before analysing the user's recent games). Defaults to the user."""
     t = _tag(tag)
-    if not settings.api_token:
+    if not settings.api_tokens:
         raise ValueError("CR_API_TOKEN not configured.")
-    async with ClashClient(settings.api_token, settings.api_base) as c:
+    async with ClashClient(settings.api_tokens, settings.api_base) as c:
         profile = await c.player(t)
         battles = await c.battlelog(t)
     if profile is None:

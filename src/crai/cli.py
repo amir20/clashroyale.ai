@@ -47,10 +47,12 @@ def _json(obj: object) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
-def _require_token(s: Settings) -> str:
-    if not s.api_token:
-        raise typer.BadParameter("CR_API_TOKEN is not set (put it in .env).")
-    return s.api_token
+def _require_tokens(s: Settings) -> tuple[str, ...]:
+    if not s.api_tokens:
+        raise typer.BadParameter(
+            "CR_API_TOKEN is not set (put one or more, comma-separated, in .env)."
+        )
+    return s.api_tokens
 
 
 def _my_tag(tag: str | None) -> str:
@@ -75,7 +77,7 @@ def sync_cards_cmd() -> None:
     s = get_settings()
 
     async def run() -> int:
-        async with ClashClient(_require_token(s), s.api_base) as c:
+        async with ClashClient(_require_tokens(s), s.api_base) as c:
             with db.session(s.db_path) as conn:
                 return await sync_cards(c, conn)
 
@@ -96,11 +98,11 @@ def crawl_cmd(
         float, typer.Option(help="Skip players fetched more recently than this")
     ] = 12.0,
     location: Annotated[str, typer.Option(help="'global' or a location id")] = "global",
-    concurrency: Annotated[int, typer.Option(help="Parallel API requests")] = 8,
+    concurrency: Annotated[int, typer.Option(help="Parallel requests per API key")] = 8,
 ) -> None:
     """Crawl seeds -> opponents -> opponents' opponents. Safe to re-run any time."""
     s = get_settings()
-    token = _require_token(s)
+    tokens = _require_tokens(s)
     tags = [*(tag or []), *([s.my_tag] if s.my_tag else [])]
     params = CrawlParams(
         top=top,
@@ -112,11 +114,16 @@ def crawl_cmd(
     )
 
     async def run() -> dict[str, object]:
-        async with ClashClient(token, s.api_base, concurrency=concurrency) as c:
+        async with ClashClient(tokens, s.api_base, concurrency=concurrency) as c:
             with db.session(s.db_path) as conn:
                 log.info("synced %d cards", await sync_cards(c, conn))
                 stats = await crawl(c, conn, params)
-            return {k: getattr(stats, k) for k in stats.__slots__}
+            summary = {k: getattr(stats, k) for k in stats.__slots__}
+            return summary | {
+                "requests": c.requests,
+                "throttled_429": c.throttled,
+                "keys": c.key_stats(),
+            }
 
     # Only one crawl at a time: they'd contend for the DB write lock and the API rate limit.
     s.db_path.parent.mkdir(parents=True, exist_ok=True)
