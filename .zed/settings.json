@@ -1,0 +1,20 @@
+// Project settings for Zed: ty for types, ruff for lint/format (both from the uv venv).
+{
+  "languages": {
+    "Python": {
+      "language_servers": ["ty", "ruff", "!basedpyright", "!pyright", "!pylsp"],
+      "format_on_save": "on",
+      "formatter": [
+        { "code_action": "source.organizeImports.ruff" },
+        { "code_action": "source.fixAll.ruff" },
+        { "language_server": { "name": "ruff" } }
+      ],
+      "preferred_line_length": 100,
+      "wrap_guides": [100]
+    }
+  },
+  "terminal": {
+    "detect_venv": { "on": { "directories": [".venv"], "activate_script": "default" } }
+  },
+  "file_scan_exclusions": ["**/.git", "**/.venv", "**/__pycache__", "**/.ruff_cache", "data"]
+}

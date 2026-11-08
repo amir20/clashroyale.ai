@@ -4,8 +4,6 @@ Repeatable: players whose battle log was fetched within `refresh_hours` are not 
 but their already-stored opponents are still used to expand the frontier.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -15,11 +13,12 @@ from datetime import UTC, datetime, timedelta
 
 from . import db
 from .api import ClashAPIError, ClashClient, normalize_tag
+from .models import ApiBattle, ApiPlayer
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class CrawlParams:
     top: int = 200
     tags: list[str] = field(default_factory=list)
@@ -30,7 +29,7 @@ class CrawlParams:
     expand_friendly: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class CrawlStats:
     players_fetched: int = 0
     players_skipped_fresh: int = 0
@@ -40,30 +39,41 @@ class CrawlStats:
     per_depth: dict[int, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class FetchResult:
+    tag: str
+    profile: ApiPlayer | None = None
+    battles: list[ApiBattle] = field(default_factory=list)
+    error: str | None = None
+
+
 def _is_fresh(conn: sqlite3.Connection, tag: str, cutoff: str) -> bool:
-    row = conn.execute(
-        "SELECT battlelog_fetched_at FROM players WHERE tag = ?", (tag,)
-    ).fetchone()
+    row = conn.execute("SELECT battlelog_fetched_at FROM players WHERE tag = ?", (tag,)).fetchone()
     return bool(row and row[0] and row[0] >= cutoff)
 
 
-async def _fetch(client: ClashClient, tag: str):
+async def _fetch(client: ClashClient, tag: str) -> FetchResult:
     """Fetch one player. Per-player failures are returned, not raised, so one flaky
     player can't kill the crawl. 403 (bad token / IP) is fatal and still raises."""
-    try:
-        profile, battles = await asyncio.gather(
-            client.player(tag), client.battlelog(tag)
-        )
-    except ClashAPIError as e:
-        if e.status == 403:
-            raise
-        return tag, None, None, str(e)
-    return tag, profile, battles, None
+    profile, battles = await asyncio.gather(
+        client.player(tag), client.battlelog(tag), return_exceptions=True
+    )
+    errors = [e for e in (profile, battles) if isinstance(e, BaseException)]
+    for e in errors:
+        if not isinstance(e, ClashAPIError) or e.status == 403:
+            raise e
+    if errors or isinstance(profile, BaseException) or isinstance(battles, BaseException):
+        return FetchResult(tag, error="; ".join(map(str, errors)))
+    return FetchResult(tag, profile, battles)
 
 
-async def crawl(
-    client: ClashClient, conn: sqlite3.Connection, params: CrawlParams
-) -> CrawlStats:
+def _discovered(result: FetchResult, *, expand_friendly: bool) -> list[str]:
+    battles = [b for b in result.battles if expand_friendly or b.get("type") != "friendly"]
+    players = [*db.participants(b) for b in battles]  # PEP 798 unpacking comprehension
+    return [t for p in players if (t := p.get("tag")) and t != result.tag]
+
+
+async def crawl(client: ClashClient, conn: sqlite3.Connection, params: CrawlParams) -> CrawlStats:
     stats = CrawlStats()
     run_id = conn.execute(
         "INSERT INTO crawl_runs (started_at, params, status) VALUES (?, ?, 'running')",
@@ -78,21 +88,19 @@ async def crawl(
         if not top:
             log.warning("No ranking data returned; continuing with explicit tags only.")
         for i, p in enumerate(top):
-            t = p["tag"]
-            seeds.append(t)
-            seed_rank[t] = p.get("rank") or i + 1
-    for t in params.tags:
-        seeds.append(normalize_tag(t))
+            seeds.append(p["tag"])
+            seed_rank[p["tag"]] = p.get("rank") or i + 1
+    seeds += [normalize_tag(t) for t in params.tags]
 
     cutoff = (datetime.now(UTC) - timedelta(hours=params.refresh_hours)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    seen: set[str] = set()
-    frontier = [t for t in dict.fromkeys(seeds)]
-    seen.update(frontier)
+    frontier = list(dict.fromkeys(seeds))
+    seen = set(frontier)
     seed_set = set(frontier)
     budget = params.max_players
-    tasks: list[asyncio.Task] = []
+    tasks: list[asyncio.Task[FetchResult]] = []
+    status = "error"
 
     try:
         for depth in range(params.depth + 1):
@@ -117,35 +125,26 @@ async def crawl(
 
             discovered: list[str] = []
             tasks = [asyncio.create_task(_fetch(client, t)) for t in to_fetch]
-            done = 0
-            for fut in asyncio.as_completed(tasks):
-                tag, profile, battles, error = await fut
-                done += 1
-                if error:
+            for done, fut in enumerate(asyncio.as_completed(tasks), start=1):
+                r = await fut
+                if r.error:
                     stats.players_failed += 1
-                    log.warning("skipping %s: %s", tag, error)
-                    continue
-                if profile is None and not battles:
+                    log.warning("skipping %s: %s", r.tag, r.error)
+                elif r.profile is None and not r.battles:
                     stats.players_missing += 1
-                    continue
-                if profile:
-                    db.upsert_player(
-                        conn,
-                        profile,
-                        is_seed=tag in seed_set,
-                        seed_rank=seed_rank.get(tag),
-                        depth=depth,
-                    )
-                stats.battles_new += db.ingest_battlelog(conn, battles)
-                db.mark_battlelog_fetched(conn, tag)
-                stats.players_fetched += 1
-                for b in battles:
-                    if b.get("type") == "friendly" and not params.expand_friendly:
-                        continue
-                    for side in ("team", "opponent"):
-                        for p in b.get(side) or []:
-                            if p.get("tag") and p["tag"] != tag:
-                                discovered.append(p["tag"])
+                else:
+                    if r.profile:
+                        db.upsert_player(
+                            conn,
+                            r.profile,
+                            is_seed=r.tag in seed_set,
+                            seed_rank=seed_rank.get(r.tag),
+                            depth=depth,
+                        )
+                    stats.battles_new += db.ingest_battlelog(conn, r.battles)
+                    db.mark_battlelog_fetched(conn, r.tag)
+                    stats.players_fetched += 1
+                    discovered += _discovered(r, expand_friendly=params.expand_friendly)
                 if done % 50 == 0:
                     conn.commit()
                     log.info(
@@ -161,17 +160,10 @@ async def crawl(
             if depth == params.depth:
                 break
             for t in expand_from_db:
-                discovered.extend(db.opponents_of(conn, t))
-
-            frontier = []
-            for t in discovered:
-                if t not in seen:
-                    seen.add(t)
-                    frontier.append(t)
+                discovered += db.opponents_of(conn, t)
+            frontier = [t for t in dict.fromkeys(discovered) if t not in seen]
+            seen.update(frontier)
         status = "ok"
-    except BaseException:
-        status = "error"
-        raise
     finally:
         # Cancel in-flight requests so an error/Ctrl-C exits cleanly.
         pending = [t for t in tasks if not t.done()]
@@ -179,8 +171,8 @@ async def crawl(
             t.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         conn.execute(
-            """UPDATE crawl_runs SET finished_at=?, players_fetched=?, battles_new=?, requests=?, status=?
-               WHERE id=?""",
+            """UPDATE crawl_runs SET finished_at=?, players_fetched=?, battles_new=?, requests=?,
+                 status=? WHERE id=?""",
             (
                 db.now_iso(),
                 stats.players_fetched,

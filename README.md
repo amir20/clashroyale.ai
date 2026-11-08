@@ -4,6 +4,8 @@ This tool crawls battle logs from the top Path of Legend players, from you, from
 
 ## Setup
 
+Requires Python 3.15 (uv installs it automatically).
+
 ```sh
 uv sync
 cp .env.example .env   # then fill in CR_API_TOKEN and CR_MY_TAG
@@ -19,7 +21,7 @@ uv run crai crawl --top 1000 --max-players 10000
 uv run crai crawl --top 0 --depth 0     # just refresh yourself
 ```
 
-- Every write is an upsert. Battles are deduplicated by `sha1(battle_time + participant tags)`, so the same game seen from both players' logs is stored once.
+- Every write is an upsert. A battle appears in both players' logs, sometimes with timestamps a second apart, so battles with the same participants within 10 seconds are stored once.
 - A player whose log was fetched in the last `--refresh-hours` (default 12) is skipped. Their opponents already in the DB are still used to expand the crawl.
 - The API only returns about the last 30 battles per player. Re-run it on a schedule (cron or launchd) to build up history.
 - Each run is logged in the `crawl_runs` table.
@@ -42,13 +44,13 @@ Card names are fuzzy-matched (`pekka`, `xbow`, `mk`, `log`).
 
 ## MCP
 
-`.mcp.json` registers the stdio server for Claude Code in this directory. To use it elsewhere:
+By default the server runs over **stdio**: Claude Code launches `crai mcp` as a subprocess, so there's no port and nothing to keep running. `.mcp.json` registers it for this directory. To use it elsewhere:
 
 ```sh
 claude mcp add clash-royale -- uv run --directory /Users/amirraminfar/Workspace/clashroyale.ai crai mcp
 ```
 
-For HTTP instead: `uv run crai mcp --transport streamable-http --port 8765`.
+For a long-running **HTTP** server instead: `uv run crai mcp --transport streamable-http --port 8765`, which serves `http://127.0.0.1:8765/mcp`. Every tool declares an output schema (from the TypedDicts in `analytics.py`).
 
 Tools: `db_overview`, `find_card`, `list_cards`, `card_stats`, `card_pairs`, `card_matchups`, `compare_cards`, `top_decks`, `complete_deck`, `player_profile`, `player_cards`, `decks_for_player`, `refresh_player` (live API), `get_schema`, `run_sql` (read-only).
 
@@ -63,6 +65,7 @@ Tools: `db_overview`, `find_card`, `list_cards`, `card_stats`, `card_pairs`, `ca
 ## Layout
 
 ```
+src/crai/models.py      TypedDicts for the API payloads
 src/crai/api.py         async httpx client (retries, 429 backoff, concurrency limit)
 src/crai/db.py          schema + idempotent ingest
 src/crai/crawl.py       BFS crawler
@@ -71,4 +74,16 @@ src/crai/cli.py         typer CLI
 src/crai/mcp_server.py  MCP server
 ```
 
-Dev: `uv run ruff format && uv run ruff check && uv run pytest`
+## Development
+
+```sh
+uv run ruff format . && uv run ruff check .   # lint + format
+uv run ty check                               # types (Astral's ty)
+uv run pytest -q                              # tests: no network (httpx.MockTransport)
+```
+
+CI runs the same commands (`.github/workflows/ci.yml`).
+
+**Zed**: `.zed/settings.json` uses ty + ruff as the Python language servers (basedpyright and pyright are disabled), with format, import sorting and fixes on save. `.zed/tasks.json` has tasks to run checks, tests (whole file or the symbol under the cursor), crawl, and the HTTP MCP server. Open them with `task: spawn`.
+
+**Python 3.15 features used**: `lazy import` (PEP 810) keeps polars/httpx out of commands that don't need them (CLI import drops from ~175 ms to ~23 ms), `frozendict` (PEP 814), unpacking in comprehensions (PEP 798). From 3.14: deferred annotations (PEP 649, so there's no `from __future__` or `TYPE_CHECKING`) and unparenthesized `except A, B` (PEP 758). Also PEP 695 generics and `type` aliases. The aliases that typer reads at runtime stay plain assignments, because typer can't unwrap `TypeAliasType` yet.

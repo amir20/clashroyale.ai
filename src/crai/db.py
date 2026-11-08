@@ -1,17 +1,21 @@
-"""SQLite schema and idempotent ingest functions.
+"""SQLite schema, migrations and idempotent ingest functions.
 
 Every write is an upsert or INSERT OR IGNORE, so re-running a crawl only adds new data.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Generator, Iterable, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+
+from .models import ApiBattle, ApiCard, ApiPlayer, BattlePlayer, CardList
+
+# The same battle appears in both players' logs, sometimes with timestamps a second apart.
+# Battles between the same participants within this window are treated as one.
+DEDUP_WINDOW_SECONDS = 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
@@ -45,7 +49,7 @@ CREATE TABLE IF NOT EXISTS players (
     pol_rank             INTEGER,
     best_pol_league      INTEGER,
     best_pol_rank        INTEGER,
-    is_seed              INTEGER NOT NULL DEFAULT 0,  -- 1 = from top ranking or explicitly requested
+    is_seed              INTEGER NOT NULL DEFAULT 0,  -- 1 = top-ranked or explicitly requested
     seed_rank            INTEGER,
     crawl_depth          INTEGER,
     first_seen_at        TEXT,
@@ -78,7 +82,8 @@ CREATE TABLE IF NOT EXISTS player_current_deck (
 CREATE TABLE IF NOT EXISTS battles (
     id                   TEXT PRIMARY KEY,  -- sha1(battle_time + sorted participant tags)
     battle_time          TEXT NOT NULL,     -- ISO-8601 UTC
-    battle_type          TEXT,              -- PvP, pathOfLegend, riverRacePvP, challenge, friendly, ...
+    participants_key     TEXT,              -- sorted participant tags joined by '|'
+    battle_type          TEXT,              -- pathOfLegend, trail (ladder), riverRacePvP, ...
     game_mode_id         INTEGER,
     game_mode            TEXT,
     arena                TEXT,
@@ -106,7 +111,7 @@ CREATE TABLE IF NOT EXISTS battle_participants (
     king_tower_hp      INTEGER,
     princess_towers_hp TEXT,              -- JSON list
     elixir_leaked      REAL,
-    deck_key           TEXT,              -- sorted card ids joined by '-', only for full 8-card decks
+    deck_key           TEXT,              -- sorted card ids joined by '-' (8-card decks only)
     avg_elixir         REAL,
     PRIMARY KEY (battle_id, player_tag)
 );
@@ -138,6 +143,8 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
 );
 """
 
+SCHEMA_VERSION = 2
+
 
 def now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -154,8 +161,67 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.executescript(SCHEMA)
+        migrate(conn)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@contextmanager
+def session(path: Path | str, *, read_only: bool = False) -> Generator[sqlite3.Connection]:
+    """Open, commit on success (writable only), and always close.
+
+    Note `with sqlite3.connect(...)` alone only manages the transaction; it never closes.
+    """
+    conn = connect(path, read_only=read_only)
+    try:
+        yield conn
+        if not read_only:
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    version: int = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < 2:
+        # v2: participants_key for timestamp-tolerant dedup; remove existing near-duplicates.
+        if "participants_key" not in _columns(conn, "battles"):
+            conn.execute("ALTER TABLE battles ADD COLUMN participants_key TEXT")
+        conn.execute(
+            """UPDATE battles SET participants_key = (
+                 SELECT group_concat(player_tag, '|') FROM (
+                   SELECT player_tag FROM battle_participants
+                   WHERE battle_id = battles.id ORDER BY player_tag))
+               WHERE participants_key IS NULL"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS battles_pkey ON battles(participants_key)")
+        dedupe_battles(conn)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+    conn.execute("CREATE INDEX IF NOT EXISTS battles_pkey ON battles(participants_key)")
+
+
+def dedupe_battles(conn: sqlite3.Connection) -> int:
+    """Delete battles that duplicate an earlier one (same participants, within the window)."""
+    dupes = [
+        r[0]
+        for r in conn.execute(
+            """SELECT DISTINCT b2.id FROM battles b1
+               JOIN battles b2 ON b2.participants_key = b1.participants_key AND b2.id <> b1.id
+               WHERE (b1.battle_time < b2.battle_time
+                      OR (b1.battle_time = b2.battle_time AND b1.id < b2.id))
+                 AND unixepoch(b2.battle_time) - unixepoch(b1.battle_time) <= ?""",
+            (DEDUP_WINDOW_SECONDS,),
+        )
+    ]
+    for table, col in (("participant_cards", "battle_id"), ("battle_participants", "battle_id")):
+        conn.executemany(f"DELETE FROM {table} WHERE {col} = ?", [(d,) for d in dupes])
+    conn.executemany("DELETE FROM battles WHERE id = ?", [(d,) for d in dupes])
+    return len(dupes)
 
 
 def parse_battle_time(s: str) -> str:
@@ -169,26 +235,27 @@ def parse_battle_time(s: str) -> str:
 # ---------------------------------------------------------------- cards
 
 
-def upsert_cards(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
+def upsert_cards(conn: sqlite3.Connection, payload: CardList) -> int:
     ts = now_iso()
-    rows = []
-    for is_support, key in ((0, "items"), (1, "supportItems")):
-        for c in payload.get(key) or []:
-            icons = c.get("iconUrls") or {}
-            rows.append(
-                (
-                    c["id"],
-                    c["name"],
-                    c.get("rarity"),
-                    c.get("elixirCost"),
-                    c.get("maxLevel"),
-                    c.get("maxEvolutionLevel"),
-                    is_support,
-                    icons.get("medium"),
-                    icons.get("evolutionMedium"),
-                    ts,
-                )
-            )
+    rows = [
+        (
+            c["id"],
+            c.get("name") or str(c["id"]),
+            c.get("rarity"),
+            c.get("elixirCost"),
+            c.get("maxLevel"),
+            c.get("maxEvolutionLevel"),
+            is_support,
+            c.get("iconUrls", {}).get("medium"),
+            c.get("iconUrls", {}).get("evolutionMedium"),
+            ts,
+        )
+        for is_support, cards in (
+            (0, payload.get("items", [])),
+            (1, payload.get("supportItems", [])),
+        )
+        for c in cards
+    ]
     conn.executemany(
         """INSERT INTO cards (id, name, rarity, elixir, max_level, max_evolution_level,
                               is_support, icon_url, evo_icon_url, updated_at)
@@ -203,9 +270,7 @@ def upsert_cards(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     return len(rows)
 
 
-def _ensure_cards(
-    conn: sqlite3.Connection, cards: Iterable[dict[str, Any]], is_support: int
-) -> None:
+def _ensure_cards(conn: sqlite3.Connection, cards: Iterable[ApiCard], is_support: int) -> None:
     """Make sure every card seen in a battle/profile exists in `cards` (even before /cards sync)."""
     conn.executemany(
         """INSERT OR IGNORE INTO cards (id, name, rarity, elixir, max_level, is_support, icon_url)
@@ -218,10 +283,9 @@ def _ensure_cards(
                 c.get("elixirCost"),
                 c.get("maxLevel"),
                 is_support,
-                (c.get("iconUrls") or {}).get("medium"),
+                c.get("iconUrls", {}).get("medium"),
             )
             for c in cards
-            if "id" in c
         ],
     )
 
@@ -231,16 +295,16 @@ def _ensure_cards(
 
 def upsert_player(
     conn: sqlite3.Connection,
-    p: dict[str, Any],
+    p: ApiPlayer,
     *,
     is_seed: bool = False,
     seed_rank: int | None = None,
     depth: int | None = None,
 ) -> None:
     ts = now_iso()
-    clan = p.get("clan") or {}
-    pol = p.get("currentPathOfLegendSeasonResult") or {}
-    best_pol = p.get("bestPathOfLegendSeasonResult") or {}
+    clan = p.get("clan", {})
+    pol = p.get("currentPathOfLegendSeasonResult", {})
+    best_pol = p.get("bestPathOfLegendSeasonResult", {})
     tag = p["tag"]
     conn.execute(
         """INSERT INTO players (tag, name, exp_level, trophies, best_trophies, wins, losses,
@@ -272,7 +336,7 @@ def upsert_player(
             p.get("threeCrownWins"),
             clan.get("tag"),
             clan.get("name"),
-            (p.get("arena") or {}).get("name"),
+            p.get("arena", {}).get("name"),
             pol.get("leagueNumber"),
             pol.get("trophies"),
             pol.get("rank"),
@@ -285,8 +349,8 @@ def upsert_player(
             ts,
         ),
     )
-    cards = p.get("cards") or []
-    support = p.get("supportCards") or []
+    cards = p.get("cards", [])
+    support = p.get("supportCards", [])
     _ensure_cards(conn, cards, 0)
     _ensure_cards(conn, support, 1)
     if cards or support:
@@ -307,79 +371,89 @@ def upsert_player(
                 for c in [*cards, *support]
             ],
         )
-    deck = p.get("currentDeck") or []
-    if deck:
+    if deck := p.get("currentDeck", []):
         conn.execute("DELETE FROM player_current_deck WHERE tag = ?", (tag,))
         conn.executemany(
-            """INSERT INTO player_current_deck (tag, slot, card_id, level, max_level, evolution_level)
-               VALUES (?,?,?,?,?,?)""",
+            """INSERT INTO player_current_deck
+                 (tag, slot, card_id, level, max_level, evolution_level) VALUES (?,?,?,?,?,?)""",
             [
-                (
-                    tag,
-                    i,
-                    c["id"],
-                    c.get("level"),
-                    c.get("maxLevel"),
-                    c.get("evolutionLevel"),
-                )
+                (tag, i, c["id"], c.get("level"), c.get("maxLevel"), c.get("evolutionLevel"))
                 for i, c in enumerate(deck)
             ],
         )
 
 
 def mark_battlelog_fetched(conn: sqlite3.Connection, tag: str) -> None:
+    ts = now_iso()
     conn.execute(
-        "INSERT INTO players (tag, first_seen_at) VALUES (?, ?) ON CONFLICT(tag) DO NOTHING",
-        (tag, now_iso()),
-    )
-    conn.execute(
-        "UPDATE players SET battlelog_fetched_at = ? WHERE tag = ?", (now_iso(), tag)
+        """INSERT INTO players (tag, first_seen_at, battlelog_fetched_at) VALUES (?, ?, ?)
+           ON CONFLICT(tag) DO UPDATE SET battlelog_fetched_at = excluded.battlelog_fetched_at""",
+        (tag, ts, ts),
     )
 
 
 # ---------------------------------------------------------------- battles
 
 
-def battle_id(b: dict[str, Any]) -> str:
-    tags = sorted(
-        p.get("tag", "?") for side in ("team", "opponent") for p in b.get(side) or []
-    )
-    return hashlib.sha1(f"{b.get('battleTime')}|{'|'.join(tags)}".encode()).hexdigest()
+def participants(b: ApiBattle) -> list[BattlePlayer]:
+    return [*b.get("team", []), *b.get("opponent", [])]
 
 
-def _result(mine: int | None, theirs: int | None) -> str | None:
-    if mine is None or theirs is None:
-        return None
+def _tags(b: ApiBattle) -> list[str]:
+    return sorted(p.get("tag", "?") for p in participants(b))
+
+
+def battle_id(b: ApiBattle) -> str:
+    return hashlib.sha1(f"{b.get('battleTime')}|{'|'.join(_tags(b))}".encode()).hexdigest()
+
+
+def _result(mine: int, theirs: int) -> str:
     return "win" if mine > theirs else "loss" if mine < theirs else "draw"
 
 
-def ingest_battle(conn: sqlite3.Connection, b: dict[str, Any]) -> bool:
+def _is_duplicate(conn: sqlite3.Connection, participants_key: str, battle_time: str) -> bool:
+    return (
+        conn.execute(
+            """SELECT 1 FROM battles WHERE participants_key = ?
+               AND abs(unixepoch(battle_time) - unixepoch(?)) <= ? LIMIT 1""",
+            (participants_key, battle_time, DEDUP_WINDOW_SECONDS),
+        ).fetchone()
+        is not None
+    )
+
+
+def ingest_battle(conn: sqlite3.Connection, b: ApiBattle) -> bool:
     """Insert one battle (from either participant's battlelog). Returns True if it was new."""
-    team, opp = b.get("team") or [], b.get("opponent") or []
+    team, opp = b.get("team", []), b.get("opponent", [])
     if not team or not opp:
         return False
     bid = battle_id(b)
+    pkey = "|".join(_tags(b))
+    btime = parse_battle_time(b.get("battleTime", ""))
+    if _is_duplicate(conn, pkey, btime):
+        return False
     # Canonical side: side 0 holds the lexicographically smallest tag, so the same battle seen
     # from either player's log is stored identically.
-    sides = [team, opp]
+    sides: list[list[BattlePlayer]] = [team, opp]
     if min(p.get("tag", "") for p in opp) < min(p.get("tag", "") for p in team):
         sides = [opp, team]
-    game_mode = b.get("gameMode") or {}
+    game_mode = b.get("gameMode", {})
     cur = conn.execute(
-        """INSERT OR IGNORE INTO battles (id, battle_time, battle_type, game_mode_id, game_mode,
-               arena, deck_selection, is_ladder_tournament, is_hosted_match, league_number,
-               team_size, ingested_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT OR IGNORE INTO battles (id, battle_time, participants_key, battle_type,
+               game_mode_id, game_mode, arena, deck_selection, is_ladder_tournament,
+               is_hosted_match, league_number, team_size, ingested_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             bid,
-            parse_battle_time(b.get("battleTime", "")),
+            btime,
+            pkey,
             b.get("type"),
             game_mode.get("id"),
             game_mode.get("name"),
-            (b.get("arena") or {}).get("name"),
+            b.get("arena", {}).get("name"),
             b.get("deckSelection"),
-            int(bool(b.get("isLadderTournament"))),
-            int(bool(b.get("isHostedMatch"))),
+            int(b.get("isLadderTournament", False)),
+            int(b.get("isHostedMatch", False)),
             b.get("leagueNumber"),
             len(team),
             now_iso(),
@@ -388,83 +462,77 @@ def ingest_battle(conn: sqlite3.Connection, b: dict[str, Any]) -> bool:
     if cur.rowcount == 0:
         return False
 
-    side_crowns = [max((p.get("crowns") or 0) for p in s) for s in sides]
+    side_crowns = [max(p.get("crowns", 0) for p in s) for s in sides]
     for side_idx, side in enumerate(sides):
         mine, theirs = side_crowns[side_idx], side_crowns[1 - side_idx]
         for p in side:
-            tag = p.get("tag")
-            if not tag:
-                continue
-            cards = p.get("cards") or []
-            support = p.get("supportCards") or []
-            _ensure_cards(conn, cards, 0)
-            _ensure_cards(conn, support, 1)
-            deck_key = (
-                "-".join(str(i) for i in sorted(c["id"] for c in cards))
-                if len(cards) == 8
-                else None
-            )
-            elixirs = [
-                c["elixirCost"] for c in cards if c.get("elixirCost") is not None
-            ]
-            conn.execute(
-                "INSERT INTO players (tag, name, first_seen_at) VALUES (?,?,?) ON CONFLICT(tag) DO NOTHING",
-                (tag, p.get("name"), now_iso()),
-            )
-            conn.execute(
-                """INSERT OR IGNORE INTO battle_participants (battle_id, player_tag, side, name,
-                       clan_tag, starting_trophies, trophy_change, crowns, opponent_crowns, result,
-                       king_tower_hp, princess_towers_hp, elixir_leaked, deck_key, avg_elixir)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    bid,
-                    tag,
-                    side_idx,
-                    p.get("name"),
-                    (p.get("clan") or {}).get("tag"),
-                    p.get("startingTrophies"),
-                    p.get("trophyChange"),
-                    p.get("crowns"),
-                    theirs,
-                    _result(mine, theirs),
-                    p.get("kingTowerHitPoints"),
-                    json.dumps(p.get("princessTowersHitPoints")),
-                    p.get("elixirLeaked"),
-                    deck_key,
-                    round(sum(elixirs) / len(elixirs), 2) if elixirs else None,
-                ),
-            )
-            conn.executemany(
-                """INSERT OR IGNORE INTO participant_cards (battle_id, player_tag, card_id, slot, kind,
-                       level, max_level, evolution_level) VALUES (?,?,?,?,?,?,?,?)""",
-                [
-                    (
-                        bid,
-                        tag,
-                        c["id"],
-                        i,
-                        kind,
-                        c.get("level"),
-                        c.get("maxLevel"),
-                        c.get("evolutionLevel"),
-                    )
-                    for kind, lst in (("deck", cards), ("support", support))
-                    for i, c in enumerate(lst)
-                ],
-            )
+            if tag := p.get("tag"):
+                _ingest_participant(conn, bid, side_idx, p, tag, mine, theirs)
     return True
 
 
-def ingest_battlelog(
-    conn: sqlite3.Connection, battles: Iterable[dict[str, Any]]
-) -> int:
+def _ingest_participant(
+    conn: sqlite3.Connection,
+    bid: str,
+    side_idx: int,
+    p: BattlePlayer,
+    tag: str,
+    mine: int,
+    theirs: int,
+) -> None:
+    cards = p.get("cards", [])
+    support = p.get("supportCards", [])
+    _ensure_cards(conn, cards, 0)
+    _ensure_cards(conn, support, 1)
+    deck_key = "-".join(str(i) for i in sorted(c["id"] for c in cards)) if len(cards) == 8 else None
+    elixirs = [e for c in cards if (e := c.get("elixirCost")) is not None]
+    conn.execute(
+        "INSERT INTO players (tag, name, first_seen_at) VALUES (?,?,?) ON CONFLICT(tag) DO NOTHING",
+        (tag, p.get("name"), now_iso()),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO battle_participants (battle_id, player_tag, side, name,
+               clan_tag, starting_trophies, trophy_change, crowns, opponent_crowns, result,
+               king_tower_hp, princess_towers_hp, elixir_leaked, deck_key, avg_elixir)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            bid,
+            tag,
+            side_idx,
+            p.get("name"),
+            p.get("clan", {}).get("tag"),
+            p.get("startingTrophies"),
+            p.get("trophyChange"),
+            p.get("crowns"),
+            theirs,
+            _result(mine, theirs),
+            p.get("kingTowerHitPoints"),
+            json.dumps(p.get("princessTowersHitPoints")),
+            p.get("elixirLeaked"),
+            deck_key,
+            round(sum(elixirs) / len(elixirs), 2) if elixirs else None,
+        ),
+    )
+    conn.executemany(
+        """INSERT OR IGNORE INTO participant_cards (battle_id, player_tag, card_id, slot, kind,
+               level, max_level, evolution_level) VALUES (?,?,?,?,?,?,?,?)""",
+        [
+            (bid, tag, c["id"], i, kind, c.get("level"), c.get("maxLevel"), c.get("evolutionLevel"))
+            for kind, lst in (("deck", cards), ("support", support))
+            for i, c in enumerate(lst)
+        ],
+    )
+
+
+def ingest_battlelog(conn: sqlite3.Connection, battles: Sequence[ApiBattle]) -> int:
     return sum(ingest_battle(conn, b) for b in battles)
 
 
 def opponents_of(conn: sqlite3.Connection, tag: str) -> list[str]:
     rows = conn.execute(
         """SELECT DISTINCT o.player_tag FROM battle_participants me
-           JOIN battle_participants o ON o.battle_id = me.battle_id AND o.player_tag <> me.player_tag
+           JOIN battle_participants o
+             ON o.battle_id = me.battle_id AND o.player_tag <> me.player_tag
            WHERE me.player_tag = ?""",
         (tag,),
     ).fetchall()

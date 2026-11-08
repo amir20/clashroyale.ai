@@ -1,38 +1,35 @@
 """`crai` command line: crawl data, then ask questions of it."""
 
-from __future__ import annotations
-
 import asyncio
 import fcntl
 import json
 import logging
+import sys
 from typing import Annotated
 
-import polars as pl
 import typer
 
-from . import db
-from .analytics import Analyzer, Filters
-from .api import ClashClient
-from .config import get_settings
-from .crawl import CrawlParams, crawl, sync_cards
+# Lazy (PEP 810): `crai crawl` never loads polars, `crai stats` never loads httpx.
+lazy import polars as pl
 
-app = typer.Typer(
-    no_args_is_help=True, help="Clash Royale crawler, analytics and MCP server."
-)
+from .config import Settings, get_settings
+lazy from . import db
+lazy from .analytics import Analyzer, CardSort, DeckSort, Filters, PairSort
+lazy from .api import ClashClient
+lazy from .crawl import CrawlParams, crawl, sync_cards
+lazy from .mcp_server import run as run_mcp
+
+app = typer.Typer(no_args_is_help=True, help="Clash Royale crawler, analytics and MCP server.")
+log = logging.getLogger("crai")
+
+# typer inspects these at runtime, so they are plain aliases rather than PEP 695 `type`.
 
 TypesOpt = Annotated[
-    list[str] | None,
-    typer.Option("--type", help="Battle type(s), e.g. pathOfLegend, PvP"),
+    list[str] | None, typer.Option("--type", help="Battle type(s), e.g. pathOfLegend, trail")
 ]
 SinceOpt = Annotated[int | None, typer.Option(help="Only battles from the last N days")]
-TopOpt = Annotated[
-    bool, typer.Option("--top-only", help="Only decks played by seed (top) players")
-]
-
-
-def _filters(types: list[str] | None, since: int | None) -> Filters:
-    return Filters(battle_types=tuple(types) if types else None, since_days=since)
+TopOpt = Annotated[bool, typer.Option("--top-only", help="Only decks played by seed (top) players")]
+TagArg = Annotated[str | None, typer.Argument(help="Player tag; defaults to CR_MY_TAG")]
 
 
 def _analyzer() -> Analyzer:
@@ -41,11 +38,7 @@ def _analyzer() -> Analyzer:
 
 def _show(df: pl.DataFrame, limit: int) -> None:
     with pl.Config(
-        tbl_rows=limit,
-        tbl_cols=20,
-        fmt_str_lengths=60,
-        tbl_width_chars=200,
-        float_precision=3,
+        tbl_rows=limit, tbl_cols=20, fmt_str_lengths=60, tbl_width_chars=200, float_precision=3
     ):
         print(df.head(limit))
 
@@ -54,11 +47,16 @@ def _json(obj: object) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
-def _client():
-    s = get_settings()
+def _require_token(s: Settings) -> str:
     if not s.api_token:
         raise typer.BadParameter("CR_API_TOKEN is not set (put it in .env).")
-    return ClashClient(s.api_token, s.api_base)
+    return s.api_token
+
+
+def _my_tag(tag: str | None) -> str:
+    if t := tag or get_settings().my_tag:
+        return t
+    raise typer.BadParameter("Pass a tag or set CR_MY_TAG.")
 
 
 @app.callback()
@@ -74,45 +72,36 @@ def _main(verbose: Annotated[bool, typer.Option("-v", "--verbose")] = False) -> 
 @app.command("sync-cards")
 def sync_cards_cmd() -> None:
     """Fetch the full card list into the database."""
+    s = get_settings()
 
     async def run() -> int:
-        async with _client() as c:
-            return await sync_cards(c, db.connect(get_settings().db_path))
+        async with ClashClient(_require_token(s), s.api_base) as c:
+            with db.session(s.db_path) as conn:
+                return await sync_cards(c, conn)
 
     print(f"synced {asyncio.run(run())} cards")
 
 
 @app.command("crawl")
 def crawl_cmd(
-    top: Annotated[
-        int, typer.Option(help="How many top-ranked players to seed with (0 = none)")
-    ] = 200,
+    top: Annotated[int, typer.Option(help="Top-ranked players to seed with (0 = none)")] = 200,
     tag: Annotated[
-        list[str] | None,
-        typer.Option(help="Extra seed tag(s); your CR_MY_TAG is always added"),
+        list[str] | None, typer.Option(help="Extra seed tag(s); CR_MY_TAG is always added")
     ] = None,
     depth: Annotated[
-        int,
-        typer.Option(
-            help="0 = seeds only, 1 = + their opponents, 2 = + opponents' opponents"
-        ),
+        int, typer.Option(help="0 = seeds, 1 = + opponents, 2 = + opponents' opponents")
     ] = 2,
-    max_players: Annotated[
-        int, typer.Option(help="Cap on players fetched from the API this run")
-    ] = 3000,
+    max_players: Annotated[int, typer.Option(help="Cap on players fetched this run")] = 3000,
     refresh_hours: Annotated[
         float, typer.Option(help="Skip players fetched more recently than this")
     ] = 12.0,
-    location: Annotated[
-        str, typer.Option(help="'global' or a location id for the seed ranking")
-    ] = "global",
+    location: Annotated[str, typer.Option(help="'global' or a location id")] = "global",
     concurrency: Annotated[int, typer.Option(help="Parallel API requests")] = 8,
 ) -> None:
     """Crawl seeds -> opponents -> opponents' opponents. Safe to re-run any time."""
     s = get_settings()
-    tags = list(tag or [])
-    if s.my_tag:
-        tags.append(s.my_tag)
+    token = _require_token(s)
+    tags = [*(tag or []), *([s.my_tag] if s.my_tag else [])]
     params = CrawlParams(
         top=top,
         tags=tags,
@@ -122,27 +111,22 @@ def crawl_cmd(
         location=location,
     )
 
-    async def run():
-        if not s.api_token:
-            raise typer.BadParameter("CR_API_TOKEN is not set (put it in .env).")
-        async with ClashClient(s.api_token, s.api_base, concurrency=concurrency) as c:
-            conn = db.connect(s.db_path)
-            n = await sync_cards(c, conn)
-            logging.getLogger("crai").info("synced %d cards", n)
-            return await crawl(c, conn, params)
+    async def run() -> dict[str, object]:
+        async with ClashClient(token, s.api_base, concurrency=concurrency) as c:
+            with db.session(s.db_path) as conn:
+                log.info("synced %d cards", await sync_cards(c, conn))
+                stats = await crawl(c, conn, params)
+            return {k: getattr(stats, k) for k in stats.__slots__}
 
     # Only one crawl at a time: they'd contend for the DB write lock and the API rate limit.
     s.db_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = (s.db_path.parent / ".crawl.lock").open("w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        typer.echo(
-            "Another `crai crawl` is already running; wait for it to finish.", err=True
-        )
-        raise typer.Exit(1) from None
-    stats = asyncio.run(run())
-    _json(stats.__dict__)
+    with (s.db_path.parent / ".crawl.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError, PermissionError:  # PEP 758: no parentheses needed
+            typer.echo("Another `crai crawl` is already running; wait for it to finish.", err=True)
+            raise typer.Exit(1) from None
+        _json(asyncio.run(run()))
 
 
 @app.command()
@@ -155,15 +139,12 @@ def overview() -> None:
 def card(query: str) -> None:
     """Look up a card by (fuzzy) name."""
     a = _analyzer()
-    cid = a.resolve_card(query)
-    _show(a.cards().filter(pl.col("card_id") == cid), 1)
+    _show(a.cards().filter(pl.col("card_id") == a.resolve_card(query)), 1)
 
 
 @app.command()
 def stats(
-    sort: Annotated[
-        str, typer.Option(help="use_rate | win_rate | adj_win_rate | games")
-    ] = "use_rate",
+    sort: CardSort = "use_rate",
     min_games: int = 30,
     limit: int = 40,
     type: TypesOpt = None,
@@ -171,20 +152,14 @@ def stats(
     top_only: TopOpt = False,
 ) -> None:
     """Card usage and win rates."""
-    _show(
-        _analyzer().card_stats(
-            _filters(type, since), top_only=top_only, min_games=min_games, sort_by=sort
-        ),
-        limit,
-    )  # type: ignore[arg-type]
+    f = Filters.of(type, since)
+    _show(_analyzer().card_stats(f, top_only=top_only, min_games=min_games, sort_by=sort), limit)
 
 
 @app.command()
 def pairs(
     card: str,
-    sort: Annotated[
-        str, typer.Option(help="games | adj_win_rate | lift | synergy")
-    ] = "games",
+    sort: PairSort = "games",
     min_games: int = 20,
     limit: int = 25,
     type: TypesOpt = None,
@@ -193,11 +168,7 @@ def pairs(
 ) -> None:
     """Which cards pair with CARD."""
     summary, df = _analyzer().card_pairs(
-        card,
-        _filters(type, since),
-        top_only=top_only,
-        min_games=min_games,
-        sort_by=sort,  # type: ignore[arg-type]
+        card, Filters.of(type, since), top_only=top_only, min_games=min_games, sort_by=sort
     )
     _json(summary)
     _show(df, limit)
@@ -206,9 +177,7 @@ def pairs(
 @app.command()
 def counters(
     card: str,
-    favorable: Annotated[
-        bool, typer.Option(help="Show best matchups instead of counters")
-    ] = False,
+    favorable: Annotated[bool, typer.Option(help="Show best matchups instead")] = False,
     min_games: int = 20,
     limit: int = 25,
     type: TypesOpt = None,
@@ -218,7 +187,7 @@ def counters(
     """Opponent cards that beat (or lose to) decks with CARD."""
     summary, df = _analyzer().card_matchups(
         card,
-        _filters(type, since),
+        Filters.of(type, since),
         top_only=top_only,
         min_games=min_games,
         mode="favorable" if favorable else "counters",
@@ -229,15 +198,9 @@ def counters(
 
 @app.command()
 def decks(
-    with_: Annotated[
-        list[str] | None, typer.Option("--with", help="Deck must contain this card")
-    ] = None,
-    without: Annotated[
-        list[str] | None, typer.Option(help="Deck must not contain this card")
-    ] = None,
-    sort: Annotated[
-        str, typer.Option(help="adj_win_rate | win_rate | games")
-    ] = "adj_win_rate",
+    with_: Annotated[list[str] | None, typer.Option("--with", help="Must contain card")] = None,
+    without: Annotated[list[str] | None, typer.Option(help="Must not contain card")] = None,
+    sort: DeckSort = "adj_win_rate",
     min_games: int = 10,
     limit: int = 15,
     type: TypesOpt = None,
@@ -246,18 +209,18 @@ def decks(
 ) -> None:
     """Best exact decks."""
     rows = _analyzer().top_decks(
-        _filters(type, since),
-        include=list(with_ or []),
-        exclude=list(without or []),
+        Filters.of(type, since),
+        include=with_ or [],
+        exclude=without or [],
         top_only=top_only,
         min_games=min_games,
-        sort_by=sort,  # type: ignore[arg-type]
+        sort_by=sort,
         limit=limit,
     )
     for r in rows:
         print(
             f"{r['adj_win_rate']:.3f} adj | {r['win_rate']:.3f} wr | {r['games']:>5} games | "
-            f"{r['avg_elixir']} elx | " + ", ".join(r["cards"])
+            f"{r['avg_elixir']} elx | {', '.join(r['cards'])}"
         )
 
 
@@ -272,41 +235,31 @@ def complete(
     """Suggest cards to complete a partial deck."""
     _json(
         _analyzer().complete_deck(
-            cards, _filters(type, since), top_only=top_only, min_games=min_games
+            cards, Filters.of(type, since), top_only=top_only, min_games=min_games
         )
     )
 
 
 @app.command()
-def player(
-    tag: Annotated[str | None, typer.Argument(help="Defaults to CR_MY_TAG")] = None,
-) -> None:
+def player(tag: TagArg = None) -> None:
     """Player profile, record and recent battles."""
-    t = tag or get_settings().my_tag
-    if not t:
-        raise typer.BadParameter("Pass a tag or set CR_MY_TAG.")
-    _json(_analyzer().player_profile(t))
+    _json(_analyzer().player_profile(_my_tag(tag)))
 
 
 @app.command("my-decks")
 def my_decks(
-    tag: Annotated[str | None, typer.Argument(help="Defaults to CR_MY_TAG")] = None,
+    tag: TagArg = None,
     min_games: int = 15,
-    min_level: Annotated[
-        int | None, typer.Option(help="Only use your cards at or above this level")
-    ] = None,
+    min_level: Annotated[int | None, typer.Option(help="Only cards at/above this level")] = None,
     type: TypesOpt = None,
     since: SinceOpt = None,
     top_only: TopOpt = False,
 ) -> None:
     """Proven decks you can build from your collection."""
-    t = tag or get_settings().my_tag
-    if not t:
-        raise typer.BadParameter("Pass a tag or set CR_MY_TAG.")
     _json(
         _analyzer().decks_for_player(
-            t,
-            _filters(type, since),
+            _my_tag(tag),
+            Filters.of(type, since),
             top_only=top_only,
             min_games=min_games,
             min_level=min_level,
@@ -326,10 +279,8 @@ def mcp(
     port: int = 8765,
 ) -> None:
     """Run the MCP server (stdio by default)."""
-    from .mcp_server import run
-
-    run(transport, port)
+    run_mcp(transport, port)
 
 
 def main() -> None:
-    app()
+    sys.exit(app())

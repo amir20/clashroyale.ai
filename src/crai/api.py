@@ -1,19 +1,19 @@
 """Async client for the official Clash Royale API (https://developer.clashroyale.com)."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import random
-from typing import Any, Self
+from typing import Any, Self, cast
 from urllib.parse import quote
 
-import httpx
+lazy import httpx
+
+from .models import ApiBattle, ApiPlayer, CardList, ItemsPage, RankedPlayer, Season
 
 log = logging.getLogger(__name__)
 
 GLOBAL_LOCATION_ID = 57000000
-_TAG_CHARS = set("0289PYLQGRJCUV")
+_TAG_CHARS = frozenset("0289PYLQGRJCUV")
 
 
 def normalize_tag(tag: str) -> str:
@@ -43,13 +43,15 @@ class ClashClient:
         base_url: str,
         *,
         concurrency: int = 8,
-        max_retries: int = 6,
+        max_retries: int = 8,
         timeout: float = 30.0,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=timeout,
+            transport=transport,
         )
         self._sem = asyncio.Semaphore(concurrency)
         self._max_retries = max_retries
@@ -61,7 +63,7 @@ class ClashClient:
     async def __aexit__(self, *exc: object) -> None:
         await self._client.aclose()
 
-    async def get(self, path: str, params: dict[str, Any] | None = None) -> Any | None:
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """GET a path. Returns parsed JSON, or None on 404. Retries 429/5xx/transport errors."""
         last = ""
         for attempt in range(self._max_retries):
@@ -75,65 +77,63 @@ class ClashClient:
                 log.debug("%s on %s, retrying in %.1fs", last, path, delay)
                 await asyncio.sleep(delay)
                 continue
-            if resp.status_code == 200:
-                return resp.json()
-            if resp.status_code == 404:
-                return None
-            if resp.status_code in (429, 500, 502, 503, 504):
-                last = f"HTTP {resp.status_code}"
-                retry_after = resp.headers.get("Retry-After", "")
-                if retry_after.isdigit():
-                    delay = max(delay, float(retry_after))
-                log.debug("%s on %s, retrying in %.1fs", last, path, delay)
-                await asyncio.sleep(delay)
-                continue
-            raise ClashAPIError(resp.status_code, path, resp.text)
-        raise ClashAPIError(
-            -1, path, f"gave up after {self._max_retries} attempts ({last})"
-        )
+            match resp.status_code:
+                case 200:
+                    return resp.json()
+                case 404:
+                    return None
+                case 429 | 500 | 502 | 503 | 504:
+                    last = f"HTTP {resp.status_code}"
+                    retry_after = resp.headers.get("Retry-After", "")
+                    if retry_after.isdigit():
+                        delay = max(delay, float(retry_after))
+                    log.debug("%s on %s, retrying in %.1fs", last, path, delay)
+                    await asyncio.sleep(delay)
+                case status:
+                    raise ClashAPIError(status, path, resp.text)
+        raise ClashAPIError(-1, path, f"gave up after {self._max_retries} attempts ({last})")
 
     @staticmethod
     def _tag(tag: str) -> str:
         return quote(normalize_tag(tag), safe="")
 
-    async def player(self, tag: str) -> dict[str, Any] | None:
-        return await self.get(f"/players/{self._tag(tag)}")
+    async def player(self, tag: str) -> ApiPlayer | None:
+        return cast(ApiPlayer | None, await self.get(f"/players/{self._tag(tag)}"))
 
-    async def battlelog(self, tag: str) -> list[dict[str, Any]]:
-        return await self.get(f"/players/{self._tag(tag)}/battlelog") or []
+    async def battlelog(self, tag: str) -> list[ApiBattle]:
+        return cast(list[ApiBattle], await self.get(f"/players/{self._tag(tag)}/battlelog") or [])
 
-    async def cards(self) -> dict[str, Any]:
-        return await self.get("/cards") or {}
+    async def cards(self) -> CardList:
+        return cast(CardList, await self.get("/cards") or {})
 
-    async def top_players(
-        self, limit: int = 200, location: str | int = "global"
-    ) -> list[dict[str, Any]]:
+    async def top_players(self, limit: int = 200, location: str = "global") -> list[RankedPlayer]:
         """Top ladder players. Tries Path of Legend (current season), then trophy rankings,
         then the most recent finished Path of Legend season."""
-        loc_ids = [location] if location != "global" else [GLOBAL_LOCATION_ID, "global"]
-        paths = [f"/locations/{loc}/pathoflegend/players" for loc in loc_ids]
-        paths += [f"/locations/{loc}/rankings/players" for loc in loc_ids]
+        locs: list[str | int] = (
+            [GLOBAL_LOCATION_ID, "global"] if location == "global" else [location]
+        )
+        paths = [f"/locations/{loc}/pathoflegend/players" for loc in locs]
+        paths += [f"/locations/{loc}/rankings/players" for loc in locs]
         for path in paths:
-            items = await self._items(path, limit)
-            if items:
+            if items := await self._items(path, limit):
                 log.info("top players from %s (%d)", path, len(items))
-                return items
-        seasons = await self._items(
-            "/locations/global/seasonsV2", 100
-        ) or await self._items("/locations/global/seasons", 100)
-        codes = [s.get("code") or s.get("id") for s in seasons]
-        for code in sorted((c for c in codes if c), reverse=True)[:3]:
-            items = await self._items(
-                f"/locations/global/pathoflegend/{code}/rankings/players", limit
-            )
-            if items:
+                return cast(list[RankedPlayer], items)
+        seasons = cast(
+            list[Season],
+            await self._items("/locations/global/seasonsV2", 100)
+            or await self._items("/locations/global/seasons", 100),
+        )
+        codes = sorted((c for s in seasons if (c := s.get("code") or s.get("id"))), reverse=True)
+        for code in codes[:3]:
+            path = f"/locations/global/pathoflegend/{code}/rankings/players"
+            if items := await self._items(path, limit):
                 log.info("top players from PoL season %s (%d)", code, len(items))
-                return items
+                return cast(list[RankedPlayer], items)
         return []
 
-    async def _items(self, path: str, limit: int) -> list[dict[str, Any]]:
+    async def _items(self, path: str, limit: int) -> list[Any]:
         try:
-            data = await self.get(path, {"limit": limit})
+            data = cast(ItemsPage[Any] | None, await self.get(path, {"limit": limit}))
         except ClashAPIError as e:
             if e.status in (400, 404):
                 return []

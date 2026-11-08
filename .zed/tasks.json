@@ -1,0 +1,12 @@
+// Run with `task: spawn` (alt-shift-t). $ZED_FILE / $ZED_SYMBOL come from the active editor.
+[
+  { "label": "check: lint + types + tests", "command": "uv run ruff check . && uv run ty check && uv run pytest -q", "tags": ["check"] },
+  { "label": "test: all", "command": "uv run pytest -q" },
+  { "label": "test: current file", "command": "uv run pytest -q \"$ZED_FILE\"" },
+  { "label": "test: symbol under cursor", "command": "uv run pytest -q \"$ZED_FILE\" -k \"$ZED_SYMBOL\"" },
+  { "label": "types: ty check", "command": "uv run ty check" },
+  { "label": "crai: crawl (default)", "command": "uv run crai crawl", "use_new_terminal": true },
+  { "label": "crai: refresh me", "command": "uv run crai crawl --top 0 --depth 0" },
+  { "label": "crai: overview", "command": "uv run crai overview" },
+  { "label": "crai: MCP over HTTP :8765", "command": "uv run crai mcp --transport streamable-http --port 8765", "use_new_terminal": true }
+]

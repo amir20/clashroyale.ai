@@ -1,7 +1,5 @@
 """Settings loaded from the environment (and an optional `.env` file)."""
 
-from __future__ import annotations
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +19,7 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Settings:
     api_token: str | None
     api_base: str

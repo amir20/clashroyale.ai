@@ -5,17 +5,18 @@ score of 1 (win), 0.5 (draw) or 0 (loss). Win rates are also reported Bayesian-s
 toward 50% (`adj_win_rate`) so tiny samples don't dominate rankings.
 """
 
-from __future__ import annotations
-
 import difflib
 import re
 import sqlite3
+from collections.abc import Callable, Hashable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import cached_property
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
-import polars as pl
+lazy import polars as pl
 
 from . import db
 from .api import normalize_tag
@@ -31,10 +32,105 @@ EXCLUDED_TYPES = (
 )
 PRIOR_GAMES = 20  # strength of the 50% prior in adj_win_rate
 
-SortKey = Literal["games", "win_rate", "adj_win_rate", "use_rate", "lift", "synergy"]
+type CardRef = str | int
+type Row = dict[str, Any]
+type SqlParams = Sequence[object] | dict[str, object]
+# Plain assignments, not PEP 695 `type`: typer and pydantic read these at runtime, and typer
+# can't unwrap TypeAliasType yet.
+CardSort = Literal["use_rate", "win_rate", "adj_win_rate", "games"]
+PairSort = Literal["games", "adj_win_rate", "lift", "synergy"]
+DeckSort = Literal["adj_win_rate", "win_rate", "games"]
+MatchupMode = Literal["counters", "favorable"]
 
 
-@dataclass(frozen=True)
+# ---------------------------------------------------------------- result shapes
+
+
+class DeckResult(TypedDict):
+    cards: list[str]
+    avg_elixir: float | None
+    games: int
+    win_rate: float
+    adj_win_rate: float
+    players: int
+    top_players: int
+    card_ids: list[int]
+
+
+class PlayerDeckResult(TypedDict):
+    cards: list[str]
+    your_levels: dict[str, int]
+    avg_level: float
+    avg_elixir: float | None
+    games: int
+    win_rate: float
+    adj_win_rate: float
+
+
+class PairsSummary(TypedDict):
+    card: str
+    card_id: int
+    decks_with_card: int
+    use_rate: float
+    win_rate: float | None
+    total_decks_analyzed: int
+
+
+class MatchupSummary(TypedDict):
+    card: str
+    decks_with_card: int
+    overall_win_rate: float | None
+    note: str
+
+
+class CompleteDeckResult(TypedDict):
+    given: list[str]
+    matching_decks: int
+    win_rate_with_given: float | None
+    suggested_cards: list[Row]
+    full_decks: list[DeckResult]
+
+
+class CompareResult(TypedDict):
+    a: str
+    b: str
+    games: int
+    a_win_rate: float | None
+
+
+class UsedDeck(TypedDict):
+    cards: list[str]
+    games: int
+    win_rate: float
+
+
+class PlayerProfile(TypedDict):
+    profile: Row
+    current_deck: list[Row]
+    record_by_battle_type: list[Row]
+    most_used_decks: list[UsedDeck]
+    recent_battles: list[Row]
+
+
+class Overview(TypedDict):
+    db_path: str
+    counts: dict[str, int]
+    battle_time_span: Row | None
+    battle_types: list[Row]
+    recent_crawls: list[Row]
+    analyzable_1v1_decks: int
+
+
+class SqlResult(TypedDict):
+    columns: list[str]
+    rows: list[list[Any]]
+    truncated: bool
+
+
+# ---------------------------------------------------------------- helpers
+
+
+@dataclass(frozen=True, slots=True)
 class Filters:
     """Which battles to analyse.
 
@@ -48,6 +144,14 @@ class Filters:
     since_days: int | None = None
     deck_selection: str | None = "collection"
     min_trophies: int | None = None
+
+    @classmethod
+    def of(
+        cls, battle_types: Sequence[str] | None = None, since_days: int | None = None
+    ) -> Filters:
+        return cls(
+            battle_types=tuple(battle_types) if battle_types else None, since_days=since_days
+        )
 
 
 DEFAULT_FILTERS = Filters()
@@ -65,17 +169,44 @@ def _adj(wins: pl.Expr, games: pl.Expr) -> pl.Expr:
     return (wins + 0.5 * PRIOR_GAMES) / (games + PRIOR_GAMES)
 
 
-def records(df: pl.DataFrame, limit: int | None = None) -> list[dict[str, Any]]:
+def _with_rates(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns(
+        win_rate=pl.col("wins") / pl.col("games"),
+        adj_win_rate=_adj(pl.col("wins"), pl.col("games")),
+    )
+
+
+def _mean(df: pl.DataFrame, col: str = "score") -> float | None:
+    m = df[col].mean() if df.height else None
+    return float(m) if isinstance(m, int | float) else None
+
+
+def records(df: pl.DataFrame, limit: int | None = None) -> list[Row]:
     if limit is not None:
         df = df.head(limit)
-    df = df.with_columns(pl.col(pl.Float64, pl.Float32).round(3))
-    return df.to_dicts()
+    return df.with_columns(pl.col(pl.Float64, pl.Float32).round(3)).to_dicts()
+
+
+def _decks_schema() -> frozendict[str, pl.DataType]:
+    # A function, not a module constant, so `lazy import polars` stays lazy until first query.
+    return frozendict(
+        battle_id=pl.String(),
+        player_tag=pl.String(),
+        side=pl.Int64(),
+        deck_key=pl.String(),
+        starting_trophies=pl.Int64(),
+        battle_type=pl.String(),
+        battle_time=pl.String(),
+        is_top=pl.Int64(),
+        score=pl.Float64(),
+        cards=pl.List(pl.Int64()),
+    )
 
 
 class Analyzer:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
-        self._cache: dict[Any, Any] = {}
+        self._cache: dict[Hashable, Any] = {}
 
     # ------------------------------------------------------------ plumbing
 
@@ -86,7 +217,8 @@ class Analyzer:
             wal.stat().st_mtime if wal.exists() else 0.0,
         )
 
-    def _cached(self, key: Any, fn):
+    def _cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
+        """Memoize per DB version, so new crawl data invalidates the cache."""
         full = (key, self._version())
         if full not in self._cache:
             if len(self._cache) > 32:
@@ -94,15 +226,13 @@ class Analyzer:
             self._cache[full] = fn()
         return self._cache[full]
 
-    def connect(self) -> sqlite3.Connection:
+    def session(self) -> AbstractContextManager[sqlite3.Connection]:
         if not self.db_path.exists():
-            raise FileNotFoundError(
-                f"No database at {self.db_path}. Run `crai crawl` first."
-            )
-        return db.connect(self.db_path, read_only=True)
+            raise FileNotFoundError(f"No database at {self.db_path}. Run `crai crawl` first.")
+        return db.session(self.db_path, read_only=True)
 
-    def query(self, sql: str, params: tuple | dict = ()) -> pl.DataFrame:
-        with self.connect() as conn:
+    def query(self, sql: str, params: SqlParams = ()) -> pl.DataFrame:
+        with self.session() as conn:
             cur = conn.execute(sql, params)
             cols = [d[0] for d in cur.description or []]
             rows = [tuple(r) for r in cur.fetchall()]
@@ -110,13 +240,19 @@ class Analyzer:
             return pl.DataFrame({c: [] for c in cols})
         return pl.DataFrame(rows, schema=cols, orient="row", infer_schema_length=None)
 
+    def scalar(self, sql: str, params: SqlParams = ()) -> Any:
+        with self.session() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return row[0] if row else None
+
     # ------------------------------------------------------------ cards
 
     def cards(self) -> pl.DataFrame:
         return self._cached(
             "cards",
             lambda: self.query(
-                "SELECT id AS card_id, name, elixir, rarity, max_level, is_support FROM cards ORDER BY name"
+                "SELECT id AS card_id, name, elixir, rarity, max_level, is_support"
+                " FROM cards ORDER BY name"
             ),
         )
 
@@ -124,141 +260,117 @@ class Analyzer:
         c = self.cards()
         return dict(zip(c["card_id"].to_list(), c["name"].to_list(), strict=True))
 
-    def resolve_card(self, query: str | int) -> int:
+    def _elixir(self) -> dict[int, int | None]:
+        c = self.cards()
+        return dict(zip(c["card_id"].to_list(), c["elixir"].to_list(), strict=True))
+
+    def resolve_card(self, query: CardRef) -> int:
         """Fuzzy card lookup: id, exact name, 'pekka', 'xbow', 'mk', 'hog', ..."""
         cards = self.cards()
-        ids = cards["card_id"].to_list()
-        if isinstance(query, int) or str(query).strip().isdigit():
-            if int(query) in ids:
+        all_names = self.card_names()
+        if isinstance(query, int) or query.strip().isdigit():
+            if int(query) in all_names:
                 return int(query)
             raise CardNotFound(f"No card with id {query}")
-        q = _norm(str(query))
+        q = _norm(query)
         rows = [r for r in cards.iter_rows(named=True) if not r["is_support"]] or list(
             cards.iter_rows(named=True)
         )
         names = {r["card_id"]: _norm(r["name"]) for r in rows}
         initials = {
-            r["card_id"]: "".join(
-                w[0] for w in re.findall(r"[a-z0-9]+", r["name"].lower())
-            )
+            r["card_id"]: "".join(w[0] for w in re.findall(r"[a-z0-9]+", r["name"].lower()))
             for r in rows
         }
-        for matcher in (
-            lambda n, i: n == q,
-            lambda n, i: n.startswith(q),
-            lambda n, i: i == q and len(q) >= 2,
-            lambda n, i: q in n,
-        ):
+        matchers: list[Callable[[str, str], bool]] = [
+            lambda n, _: n == q,
+            lambda n, _: n.startswith(q),
+            lambda _, i: i == q and len(q) >= 2,
+            lambda n, _: q in n,
+        ]
+        for matcher in matchers:
             hits = [cid for cid in names if matcher(names[cid], initials[cid])]
             if len(hits) == 1:
                 return hits[0]
-            if len(hits) > 1:
-                opts = ", ".join(sorted(self.card_names()[h] for h in hits))
+            if hits:
+                opts = ", ".join(sorted(all_names[h] for h in hits))
                 raise CardNotFound(f"'{query}' is ambiguous: {opts}")
-        close = difflib.get_close_matches(q, list(names.values()), n=1, cutoff=0.75)
-        if close:
-            return next(cid for cid, n in names.items() if n == close[0])
-        suggestions = difflib.get_close_matches(
-            q, list(names.values()), n=5, cutoff=0.4
-        )
-        by_norm = {n: self.card_names()[cid] for cid, n in names.items()}
-        raise CardNotFound(
-            f"No card matching '{query}'. Did you mean: {[by_norm[s] for s in suggestions]}"
-        )
+        by_norm = {n: cid for cid, n in names.items()}
+        if close := difflib.get_close_matches(q, list(by_norm), n=1, cutoff=0.75):
+            return by_norm[close[0]]
+        suggestions = difflib.get_close_matches(q, list(by_norm), n=5, cutoff=0.4)
+        hints = [all_names[by_norm[s]] for s in suggestions]
+        raise CardNotFound(f"No card matching '{query}'. Did you mean: {hints}")
 
-    def resolve_cards(self, queries: list[str | int]) -> list[int]:
+    def resolve_cards(self, queries: Sequence[CardRef]) -> list[int]:
         return [self.resolve_card(q) for q in queries]
 
-    def _named(self, df: pl.DataFrame, col: str = "card_id") -> pl.DataFrame:
-        info = (
-            self.cards()
-            .select("card_id", "name", "elixir", "rarity")
-            .rename({"card_id": col})
+    def _named(self, df: pl.DataFrame) -> pl.DataFrame:
+        return df.join(
+            self.cards().select("card_id", "name", "elixir", "rarity"), on="card_id", how="left"
         )
-        if col != "card_id":
-            info = info.rename({"name": f"{col}_name"}).drop("elixir", "rarity")
-        return df.join(info, on=col, how="left")
 
-    def _deck_names(self, ids: list[int]) -> list[str]:
+    def _deck_names(self, ids: Sequence[int]) -> list[str]:
         names = self.card_names()
         return [names.get(i, str(i)) for i in ids]
 
-    def _avg_elixir(self, ids: list[int]) -> float | None:
-        el = dict(
-            zip(
-                self.cards()["card_id"].to_list(),
-                self.cards()["elixir"].to_list(),
-                strict=True,
-            )
-        )
-        vals = [el[i] for i in ids if el.get(i) is not None]
+    def _avg_elixir(self, ids: Sequence[int]) -> float | None:
+        el = self._elixir()
+        vals = [e for i in ids if (e := el.get(i)) is not None]
         return round(sum(vals) / len(vals), 2) if vals else None
+
+    def _deck_result(self, r: Row) -> DeckResult:
+        return {
+            "cards": self._deck_names(r["cards"]),
+            "avg_elixir": self._avg_elixir(r["cards"]),
+            "games": r["games"],
+            "win_rate": round(r["win_rate"], 3),
+            "adj_win_rate": round(r["adj_win_rate"], 3),
+            "players": r["players"],
+            "top_players": r["top_players"],
+            "card_ids": r["cards"],
+        }
 
     # ------------------------------------------------------------ deck appearances
 
     def decks(self, f: Filters = DEFAULT_FILTERS) -> pl.DataFrame:
         """One row per (battle, player) with an 8-card deck in a 1v1 battle."""
+        return self._cached(("decks", f), lambda: self._load_decks(f))
 
-        def load() -> pl.DataFrame:
-            where, params = (
-                ["b.team_size = 1", "bp.deck_key IS NOT NULL", "bp.result IS NOT NULL"],
-                [],
-            )
-            if f.battle_types:
-                where.append(
-                    f"b.battle_type IN ({','.join('?' * len(f.battle_types))})"
-                )
-                params += list(f.battle_types)
-            else:
-                where.append(
-                    f"coalesce(b.battle_type,'') NOT IN ({','.join('?' * len(EXCLUDED_TYPES))})"
-                )
-                params += list(EXCLUDED_TYPES)
-            if f.deck_selection:
-                where.append("coalesce(b.deck_selection, 'collection') = ?")
-                params.append(f.deck_selection)
-            if f.since_days:
-                cutoff = (datetime.now(UTC) - timedelta(days=f.since_days)).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
-                where.append("b.battle_time >= ?")
-                params.append(cutoff)
-            df = self.query(
-                f"""SELECT bp.battle_id, bp.player_tag, bp.side, bp.result, bp.deck_key,
-                           bp.starting_trophies, b.battle_type, b.battle_time,
-                           coalesce(p.is_seed, 0) AS is_top
-                    FROM battle_participants bp
-                    JOIN battles b ON b.id = bp.battle_id
-                    LEFT JOIN players p ON p.tag = bp.player_tag
-                    WHERE {" AND ".join(where)}""",
-                tuple(params),
-            )
-            if df.is_empty():
-                return pl.DataFrame(
-                    schema={
-                        "battle_id": pl.String,
-                        "player_tag": pl.String,
-                        "side": pl.Int64,
-                        "deck_key": pl.String,
-                        "starting_trophies": pl.Int64,
-                        "battle_type": pl.String,
-                        "battle_time": pl.String,
-                        "is_top": pl.Int64,
-                        "score": pl.Float64,
-                        "cards": pl.List(pl.Int64),
-                    }
-                )
-            return df.with_columns(
-                score=pl.when(pl.col("result") == "win")
-                .then(1.0)
-                .when(pl.col("result") == "draw")
-                .then(0.5)
-                .otherwise(0.0),
-                cards=pl.col("deck_key").str.split("-").cast(pl.List(pl.Int64)),
-                starting_trophies=pl.col("starting_trophies").cast(pl.Int64),
-            ).drop("result")
-
-        return self._cached(("decks", f), load)
+    def _load_decks(self, f: Filters) -> pl.DataFrame:
+        where = ["b.team_size = 1", "bp.deck_key IS NOT NULL", "bp.result IS NOT NULL"]
+        params: list[object] = []
+        types = f.battle_types or EXCLUDED_TYPES
+        op = "IN" if f.battle_types else "NOT IN"
+        where.append(f"coalesce(b.battle_type, '') {op} ({','.join('?' * len(types))})")
+        params += types
+        if f.deck_selection:
+            where.append("coalesce(b.deck_selection, 'collection') = ?")
+            params.append(f.deck_selection)
+        if f.since_days:
+            cutoff = datetime.now(UTC) - timedelta(days=f.since_days)
+            where.append("b.battle_time >= ?")
+            params.append(cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        df = self.query(
+            f"""SELECT bp.battle_id, bp.player_tag, bp.side, bp.result, bp.deck_key,
+                       bp.starting_trophies, b.battle_type, b.battle_time,
+                       coalesce(p.is_seed, 0) AS is_top
+                FROM battle_participants bp
+                JOIN battles b ON b.id = bp.battle_id
+                LEFT JOIN players p ON p.tag = bp.player_tag
+                WHERE {" AND ".join(where)}""",
+            params,
+        )
+        if df.is_empty():
+            return pl.DataFrame(schema=_decks_schema())
+        return df.with_columns(
+            score=pl.when(pl.col("result") == "win")
+            .then(1.0)
+            .when(pl.col("result") == "draw")
+            .then(0.5)
+            .otherwise(0.0),
+            cards=pl.col("deck_key").str.split("-").cast(pl.List(pl.Int64)),
+            starting_trophies=pl.col("starting_trophies").cast(pl.Int64),
+        ).drop("result")
 
     def _subject(self, f: Filters, top_only: bool) -> pl.DataFrame:
         d = self.decks(f)
@@ -269,11 +381,10 @@ class Analyzer:
         return d
 
     @staticmethod
-    def _with_rates(df: pl.DataFrame) -> pl.DataFrame:
-        return df.with_columns(
-            win_rate=pl.col("wins") / pl.col("games"),
-            adj_win_rate=_adj(pl.col("wins"), pl.col("games")),
-        )
+    def _containing(d: pl.DataFrame, ids: Sequence[int]) -> pl.DataFrame:
+        for cid in ids:
+            d = d.filter(pl.col("cards").list.contains(cid))
+        return d
 
     # ------------------------------------------------------------ questions
 
@@ -283,7 +394,7 @@ class Analyzer:
         *,
         top_only: bool = False,
         min_games: int = 30,
-        sort_by: SortKey = "use_rate",
+        sort_by: CardSort = "use_rate",
         descending: bool = True,
     ) -> pl.DataFrame:
         """Usage and win rate of every card."""
@@ -293,11 +404,11 @@ class Analyzer:
             d.explode("cards")
             .group_by(pl.col("cards").alias("card_id"))
             .agg(games=pl.len(), wins=pl.col("score").sum())
-            .pipe(self._with_rates)
+            .pipe(_with_rates)
             .with_columns(use_rate=pl.col("games") / total)
             .filter(pl.col("games") >= min_games)
         )
-        s = self._named(s).select(
+        cols = [
             "name",
             "card_id",
             "elixir",
@@ -306,18 +417,18 @@ class Analyzer:
             "use_rate",
             "win_rate",
             "adj_win_rate",
-        )
-        return s.sort(sort_by, descending=descending)
+        ]
+        return self._named(s).select(cols).sort(sort_by, descending=descending)
 
     def card_pairs(
         self,
-        card: str | int,
+        card: CardRef,
         f: Filters = DEFAULT_FILTERS,
         *,
         top_only: bool = False,
         min_games: int = 20,
-        sort_by: SortKey = "games",
-    ) -> tuple[dict[str, Any], pl.DataFrame]:
+        sort_by: PairSort = "games",
+    ) -> tuple[PairsSummary, pl.DataFrame]:
         """Cards that appear in decks alongside `card`, and how those decks perform.
 
         pair_rate: share of decks with X that also run Y.
@@ -327,9 +438,9 @@ class Analyzer:
         cid = self.resolve_card(card)
         d = self._subject(f, top_only)
         total = max(d.height, 1)
-        with_x = d.filter(pl.col("cards").list.contains(cid))
+        with_x = self._containing(d, [cid])
         n_x = with_x.height
-        wr_x = with_x["score"].mean() if n_x else None
+        wr_x = _mean(with_x)
         usage = (
             d.explode("cards")
             .group_by(pl.col("cards").alias("card_id"))
@@ -340,7 +451,7 @@ class Analyzer:
             .filter(pl.col("cards") != cid)
             .group_by(pl.col("cards").alias("card_id"))
             .agg(games=pl.len(), wins=pl.col("score").sum())
-            .pipe(self._with_rates)
+            .pipe(_with_rates)
             .join(usage, on="card_id", how="left")
             .with_columns(pair_rate=pl.col("games") / max(n_x, 1))
             .with_columns(
@@ -349,18 +460,9 @@ class Analyzer:
             )
             .filter(pl.col("games") >= min_games)
         )
-        p = self._named(p).select(
-            "name",
-            "card_id",
-            "elixir",
-            "games",
-            "pair_rate",
-            "lift",
-            "win_rate",
-            "adj_win_rate",
-            "synergy",
-        )
-        summary = {
+        cols = ["name", "card_id", "elixir", "games", "pair_rate", "lift"]
+        cols += ["win_rate", "adj_win_rate", "synergy"]
+        summary: PairsSummary = {
             "card": self.card_names()[cid],
             "card_id": cid,
             "decks_with_card": n_x,
@@ -368,25 +470,25 @@ class Analyzer:
             "win_rate": wr_x,
             "total_decks_analyzed": d.height,
         }
-        return summary, p.sort(sort_by, descending=True)
+        return summary, self._named(p).select(cols).sort(sort_by, descending=True)
 
     def card_matchups(
         self,
-        card: str | int,
+        card: CardRef,
         f: Filters = DEFAULT_FILTERS,
         *,
         top_only: bool = False,
         min_games: int = 20,
-        mode: Literal["counters", "favorable"] = "counters",
-    ) -> tuple[dict[str, Any], pl.DataFrame]:
+        mode: MatchupMode = "counters",
+    ) -> tuple[MatchupSummary, pl.DataFrame]:
         """How decks containing `card` do when the opponent runs card Y.
 
         mode='counters' sorts by lowest win rate (Y counters X); 'favorable' by highest.
         delta: win rate vs Y minus overall win rate of X decks.
         """
         cid = self.resolve_card(card)
-        subject = self._subject(f, top_only).filter(pl.col("cards").list.contains(cid))
-        wr_x = subject["score"].mean() if subject.height else None
+        subject = self._containing(self._subject(f, top_only), [cid])
+        wr_x = _mean(subject)
         opp = self.decks(f).select(
             "battle_id", pl.col("side").alias("opp_side"), pl.col("cards").alias("opp")
         )
@@ -397,7 +499,7 @@ class Analyzer:
             .explode("opp")
             .group_by(pl.col("opp").alias("card_id"))
             .agg(games=pl.len(), wins=pl.col("score").sum())
-            .pipe(self._with_rates)
+            .pipe(_with_rates)
             .with_columns(delta=pl.col("win_rate") - (wr_x or 0.0))
             .filter(pl.col("games") >= min_games)
         )
@@ -409,30 +511,28 @@ class Analyzer:
             "adj_win_rate",
             "delta",
         )
-        summary = {
+        summary: MatchupSummary = {
             "card": self.card_names()[cid],
             "decks_with_card": subject.height,
             "overall_win_rate": wr_x,
-            "note": "win_rate = how often the deck WITH the card wins when the opponent has opponent_card",
+            "note": "win_rate = how often the deck WITH the card wins vs opponent_card",
         }
-        return summary, m.sort("adj_win_rate", descending=(mode == "favorable"))
+        return summary, m.sort("adj_win_rate", descending=mode == "favorable")
 
     def top_decks(
         self,
         f: Filters = DEFAULT_FILTERS,
         *,
-        include: list[str | int] | None = None,
-        exclude: list[str | int] | None = None,
+        include: Sequence[CardRef] = (),
+        exclude: Sequence[CardRef] = (),
         top_only: bool = False,
         min_games: int = 10,
-        sort_by: Literal["games", "win_rate", "adj_win_rate"] = "adj_win_rate",
+        sort_by: DeckSort = "adj_win_rate",
         limit: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> list[DeckResult]:
         """Most successful/popular exact 8-card decks, optionally containing/excluding cards."""
-        d = self._subject(f, top_only)
-        for cid in self.resolve_cards(include or []):
-            d = d.filter(pl.col("cards").list.contains(cid))
-        for cid in self.resolve_cards(exclude or []):
+        d = self._containing(self._subject(f, top_only), self.resolve_cards(include))
+        for cid in self.resolve_cards(exclude):
             d = d.filter(~pl.col("cards").list.contains(cid))
         g = (
             d.group_by("deck_key")
@@ -440,123 +540,86 @@ class Analyzer:
                 games=pl.len(),
                 wins=pl.col("score").sum(),
                 players=pl.col("player_tag").n_unique(),
-                top_players=pl.col("player_tag")
-                .filter(pl.col("is_top") == 1)
-                .n_unique(),
+                top_players=pl.col("player_tag").filter(pl.col("is_top") == 1).n_unique(),
                 cards=pl.col("cards").first(),
             )
-            .pipe(self._with_rates)
+            .pipe(_with_rates)
             .filter(pl.col("games") >= min_games)
             .sort(sort_by, "games", descending=True)
             .head(limit)
         )
-        out = []
-        for r in g.iter_rows(named=True):
-            out.append(
-                {
-                    "cards": self._deck_names(r["cards"]),
-                    "avg_elixir": self._avg_elixir(r["cards"]),
-                    "games": r["games"],
-                    "win_rate": round(r["win_rate"], 3),
-                    "adj_win_rate": round(r["adj_win_rate"], 3),
-                    "players": r["players"],
-                    "top_players": r["top_players"],
-                    "card_ids": r["cards"],
-                }
-            )
-        return out
+        return [self._deck_result(r) for r in g.iter_rows(named=True)]
 
     def complete_deck(
         self,
-        cards: list[str | int],
+        cards: Sequence[CardRef],
         f: Filters = DEFAULT_FILTERS,
         *,
         top_only: bool = False,
         min_games: int = 10,
         limit: int = 15,
-    ) -> dict[str, Any]:
+    ) -> CompleteDeckResult:
         """Given a partial deck, which cards do winning decks add, and which full decks exist?"""
         ids = self.resolve_cards(cards)
-        d = self._subject(f, top_only)
-        for cid in ids:
-            d = d.filter(pl.col("cards").list.contains(cid))
+        d = self._containing(self._subject(f, top_only), ids)
         n = d.height
         cand = (
             d.explode("cards")
             .filter(~pl.col("cards").is_in(ids))
             .group_by(pl.col("cards").alias("card_id"))
             .agg(games=pl.len(), wins=pl.col("score").sum())
-            .pipe(self._with_rates)
+            .pipe(_with_rates)
             .with_columns(pair_rate=pl.col("games") / max(n, 1))
             .filter(pl.col("games") >= min_games)
             .sort("adj_win_rate", descending=True)
         )
-        cand = self._named(cand).select(
-            "name", "elixir", "games", "pair_rate", "win_rate", "adj_win_rate"
-        )
+        cols = ["name", "elixir", "games", "pair_rate", "win_rate", "adj_win_rate"]
         return {
             "given": self._deck_names(ids),
             "matching_decks": n,
-            "win_rate_with_given": d["score"].mean() if n else None,
-            "suggested_cards": records(cand, limit),
+            "win_rate_with_given": _mean(d),
+            "suggested_cards": records(self._named(cand).select(cols), limit),
             "full_decks": self.top_decks(
-                f,
-                include=ids,
-                top_only=top_only,
-                min_games=max(3, min_games // 3),
-                limit=10,
+                f, include=ids, top_only=top_only, min_games=max(3, min_games // 3), limit=10
             ),
         }
 
     def compare_cards(
-        self,
-        a: str | int,
-        b: str | int,
-        f: Filters = DEFAULT_FILTERS,
-        *,
-        top_only: bool = False,
-    ) -> dict[str, Any]:
+        self, a: CardRef, b: CardRef, f: Filters = DEFAULT_FILTERS, *, top_only: bool = False
+    ) -> CompareResult:
         """Head to head: when deck with A meets deck with B (and not both), who wins?"""
         ia, ib = self.resolve_card(a), self.resolve_card(b)
-        d = self.decks(f)
-        sub = self._subject(f, top_only)
-        has_a = sub.filter(
-            pl.col("cards").list.contains(ia) & ~pl.col("cards").list.contains(ib)
+        has = pl.col("cards").list.contains
+        has_a = self._subject(f, top_only).filter(has(ia) & ~has(ib))
+        opp_b = (
+            self.decks(f)
+            .filter(has(ib) & ~has(ia))
+            .select("battle_id", pl.col("side").alias("opp_side"))
         )
-        opp_b = d.filter(
-            pl.col("cards").list.contains(ib) & ~pl.col("cards").list.contains(ia)
-        ).select("battle_id", pl.col("side").alias("opp_side"))
-        m = has_a.join(opp_b, on="battle_id").filter(
-            pl.col("side") != pl.col("opp_side")
-        )
-        return {
-            "a": self.card_names()[ia],
-            "b": self.card_names()[ib],
-            "games": m.height,
-            "a_win_rate": m["score"].mean() if m.height else None,
-        }
+        m = has_a.join(opp_b, on="battle_id").filter(pl.col("side") != pl.col("opp_side"))
+        names = self.card_names()
+        return {"a": names[ia], "b": names[ib], "games": m.height, "a_win_rate": _mean(m)}
 
     # ------------------------------------------------------------ players
 
+    @cached_property
+    def _max_common_level(self) -> int:
+        return int(self.scalar("SELECT max(max_level) FROM cards WHERE is_support = 0") or 16)
+
     def player_cards(self, tag: str) -> pl.DataFrame:
-        tag = normalize_tag(tag)
-        max_common = (
-            self.query("SELECT max(max_level) FROM cards WHERE is_support = 0").item()
-            or 16
-        )
         df = self.query(
-            """SELECT c.name, pc.card_id, c.rarity, c.elixir, pc.level, pc.max_level, pc.evolution_level,
-                      pc.star_level, pc.count, c.is_support
+            """SELECT c.name, pc.card_id, c.rarity, c.elixir, pc.level, pc.max_level,
+                      pc.evolution_level, pc.star_level, pc.count, c.is_support
                FROM player_cards pc JOIN cards c ON c.id = pc.card_id WHERE pc.tag = ?""",
-            (tag,),
+            (normalize_tag(tag),),
         )
         if df.is_empty():
             return df
         return df.with_columns(
-            level_normalized=pl.col("level") + (max_common - pl.col("max_level"))
+            level_normalized=pl.col("level") + (self._max_common_level - pl.col("max_level"))
         ).sort("level_normalized", descending=True)
 
-    def player_profile(self, tag: str, recent: int = 15) -> dict[str, Any]:
+    def player_profile(self, tag: str, recent: int = 15) -> PlayerProfile:
         tag = normalize_tag(tag)
         prof = self.query("SELECT * FROM players WHERE tag = ?", (tag,))
         if prof.is_empty():
@@ -564,23 +627,23 @@ class Analyzer:
                 f"Player {tag} not in database. Fetch it with `crai crawl --tag {tag} --top 0`."
             )
         deck = self.query(
-            """SELECT c.name, d.level + ((SELECT max(max_level) FROM cards WHERE is_support = 0) - d.max_level)
-                      AS level, d.evolution_level FROM player_current_deck d
-               JOIN cards c ON c.id = d.card_id WHERE d.tag = ? ORDER BY d.slot""",
-            (tag,),
+            """SELECT c.name, d.level + (? - d.max_level) AS level, d.evolution_level
+               FROM player_current_deck d JOIN cards c ON c.id = d.card_id
+               WHERE d.tag = ? ORDER BY d.slot""",
+            (self._max_common_level, tag),
         )
         by_type = self.query(
             """SELECT b.battle_type, count(*) AS games,
-                      round(avg(CASE bp.result WHEN 'win' THEN 1.0 WHEN 'draw' THEN 0.5 ELSE 0 END), 3)
-                        AS win_rate
+                      round(avg(CASE bp.result WHEN 'win' THEN 1.0 WHEN 'draw' THEN 0.5 ELSE 0 END),
+                            3) AS win_rate
                FROM battle_participants bp JOIN battles b ON b.id = bp.battle_id
                WHERE bp.player_tag = ? GROUP BY 1 ORDER BY 2 DESC""",
             (tag,),
         )
         battles = self.query(
-            """SELECT b.battle_time, b.battle_type, b.game_mode, me.result, me.crowns, me.opponent_crowns,
-                      me.trophy_change, me.deck_key AS my_deck, o.name AS opponent, o.player_tag AS opponent_tag,
-                      o.deck_key AS opponent_deck
+            """SELECT b.battle_time, b.battle_type, b.game_mode, me.result, me.crowns,
+                      me.opponent_crowns, me.trophy_change, me.deck_key AS my_deck,
+                      o.name AS opponent, o.player_tag AS opponent_tag, o.deck_key AS opponent_deck
                FROM battle_participants me
                JOIN battles b ON b.id = me.battle_id
                LEFT JOIN battle_participants o ON o.battle_id = me.battle_id AND o.side <> me.side
@@ -591,22 +654,16 @@ class Analyzer:
         def names(key: str | None) -> list[str] | None:
             return self._deck_names([int(x) for x in key.split("-")]) if key else None
 
-        recent_rows = []
-        for r in battles.iter_rows(named=True):
-            r["my_deck"] = names(r["my_deck"])
-            r["opponent_deck"] = names(r["opponent_deck"])
-            recent_rows.append(r)
-
+        recent_rows = [
+            r | {"my_deck": names(r["my_deck"]), "opponent_deck": names(r["opponent_deck"])}
+            for r in battles.iter_rows(named=True)
+        ]
         my_decks = (
             self.decks(Filters(deck_selection=None))
             .filter(pl.col("player_tag") == tag)
             .group_by("deck_key")
-            .agg(
-                games=pl.len(),
-                wins=pl.col("score").sum(),
-                cards=pl.col("cards").first(),
-            )
-            .pipe(self._with_rates)
+            .agg(games=pl.len(), wins=pl.col("score").sum(), cards=pl.col("cards").first())
+            .pipe(_with_rates)
             .sort("games", descending=True)
             .head(5)
         )
@@ -634,16 +691,14 @@ class Analyzer:
         min_games: int = 15,
         min_level: int | None = None,
         limit: int = 15,
-    ) -> list[dict[str, Any]]:
+    ) -> list[PlayerDeckResult]:
         """Proven decks the player can build from their collection, with their card levels."""
         pc = self.player_cards(tag)
         if pc.is_empty():
-            raise ValueError(
-                f"No card collection stored for {tag}; crawl that player first."
-            )
+            raise ValueError(f"No card collection stored for {tag}; crawl that player first.")
         if min_level is not None:
             pc = pc.filter(pl.col("level_normalized") >= min_level)
-        levels = dict(
+        levels: dict[int, int] = dict(
             zip(pc["card_id"].to_list(), pc["level_normalized"].to_list(), strict=True)
         )
         owned = list(levels)
@@ -652,25 +707,20 @@ class Analyzer:
         )
         g = (
             d.group_by("deck_key")
-            .agg(
-                games=pl.len(),
-                wins=pl.col("score").sum(),
-                cards=pl.col("cards").first(),
-            )
-            .pipe(self._with_rates)
+            .agg(games=pl.len(), wins=pl.col("score").sum(), cards=pl.col("cards").first())
+            .pipe(_with_rates)
             .filter(pl.col("games") >= min_games)
             .sort("adj_win_rate", descending=True)
             .head(limit)
         )
-        out = []
+        out: list[PlayerDeckResult] = []
         for r in g.iter_rows(named=True):
+            card_names = self._deck_names(r["cards"])
             lv = [levels[c] for c in r["cards"]]
             out.append(
                 {
-                    "cards": self._deck_names(r["cards"]),
-                    "your_levels": dict(
-                        zip(self._deck_names(r["cards"]), lv, strict=True)
-                    ),
+                    "cards": card_names,
+                    "your_levels": dict(zip(card_names, lv, strict=True)),
                     "avg_level": round(sum(lv) / len(lv), 2),
                     "avg_elixir": self._avg_elixir(r["cards"]),
                     "games": r["games"],
@@ -682,31 +732,19 @@ class Analyzer:
 
     # ------------------------------------------------------------ meta
 
-    def overview(self) -> dict[str, Any]:
-        q = self.query
-        counts = {
-            t: q(f"SELECT count(*) FROM {t}").item()
-            for t in (
-                "cards",
-                "players",
-                "battles",
-                "battle_participants",
-                "participant_cards",
-            )
-        }
-        counts["players_with_battlelog"] = q(
+    def overview(self) -> Overview:
+        tables = ("cards", "players", "battles", "battle_participants", "participant_cards")
+        counts: dict[str, int] = {t: self.scalar(f"SELECT count(*) FROM {t}") for t in tables}
+        counts["players_with_battlelog"] = self.scalar(
             "SELECT count(*) FROM players WHERE battlelog_fetched_at IS NOT NULL"
-        ).item()
-        counts["seed_players"] = q(
-            "SELECT count(*) FROM players WHERE is_seed = 1"
-        ).item()
-        span = q(
-            "SELECT min(battle_time) AS first, max(battle_time) AS last FROM battles"
         )
-        types = q(
-            "SELECT battle_type, team_size, count(*) AS n FROM battles GROUP BY 1, 2 ORDER BY 3 DESC"
+        counts["seed_players"] = self.scalar("SELECT count(*) FROM players WHERE is_seed = 1")
+        span = self.query("SELECT min(battle_time) AS first, max(battle_time) AS last FROM battles")
+        types = self.query(
+            "SELECT battle_type, team_size, count(*) AS n FROM battles"
+            " GROUP BY 1, 2 ORDER BY 3 DESC"
         )
-        runs = q("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 5")
+        runs = self.query("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 5")
         return {
             "db_path": str(self.db_path),
             "counts": counts,
@@ -716,9 +754,9 @@ class Analyzer:
             "analyzable_1v1_decks": self.decks().height,
         }
 
-    def sql(self, sql: str, limit: int = 200) -> dict[str, Any]:
-        """Run a read-only SQL statement."""
-        with self.connect() as conn:
+    def sql(self, sql: str, limit: int = 200) -> SqlResult:
+        """Run one read-only SQL statement."""
+        with self.session() as conn:
             cur = conn.execute(sql)
             cols = [d[0] for d in cur.description or []]
             rows = cur.fetchmany(limit + 1)
