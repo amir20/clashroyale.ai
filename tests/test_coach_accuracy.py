@@ -278,3 +278,34 @@ def test_a_recommended_deck_must_win_more_than_it_loses(analyzer: Analyzer) -> N
 def test_matchup_tips_fit_the_kind_of_card() -> None:
     assert "Spread" in voice._tip_against({"id": 28000000, "name": "Fireball"})
     assert "lane" in voice._tip_against({"id": 27000000, "name": "Cannon"})
+
+
+def test_surprises_are_ranked_proven_and_worded(analyzer: Analyzer) -> None:
+    items = insights.games(analyzer, ME)
+    found = insights.surprises(analyzer, ME, items)
+    assert len(found) <= insights.MAX_SURPRISES
+    assert [f["score"] for f in found] == sorted((f["score"] for f in found), reverse=True)
+    for f in found:
+        words = voice.surprise(f)
+        assert words["headline"] and words["detail"]
+
+
+def test_free_wins_need_a_real_record(analyzer: Analyzer) -> None:
+    found = insights.free_wins(analyzer, insights.games(analyzer, ME))
+    for c in (found or {"cards": []})["cards"]:
+        assert c["games"] >= insights.MIN_FREE_WIN_GAMES
+        assert c["win_rate"] >= insights.FREE_WIN_RATE
+
+
+def test_surprise_words_for_every_kind() -> None:
+    card = {"id": 26000021, "name": "Hog Rider"}
+    rec = {"games": 40, "wins": 30, "win_rate": 0.75}
+    examples = [
+        {"kind": "signature_card", "card": card, "record": rec, "field_win_rate": 0.5},
+        {"kind": "unique_deck", "players_alike": 0, "players_total": 50_000, "shared_cards": 6},
+        {"kind": "free_wins", "cards": [card | {"games": 10, "wins": 10}]},
+        {"kind": "evolution_gap", "your_evolutions": 3, "matched": rec, "fewer": rec},
+    ]
+    for x in examples:
+        assert voice.surprise(x)["headline"]
+    assert voice.surprise(examples[2])["detail"] == "You're 10-0 when they bring it."

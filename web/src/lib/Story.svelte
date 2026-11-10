@@ -3,6 +3,7 @@
   import { fly } from "svelte/transition";
   import type { Card, Report } from "./api";
   import CardTile from "./CardTile.svelte";
+  import Icon, { type IconName } from "./Icon.svelte";
   import Rook from "./Rook.svelte";
   import Visual from "./Visual.svelte";
 
@@ -27,6 +28,7 @@
   const s = $derived(report.story);
   const slides = $derived([
     "you",
+    ...(s.surprises?.length ? ["wow"] : []),
     ...(o.deck.length ? ["deck"] : []),
     ...(s.trend ? ["trend"] : []),
     ...(s.close ? ["close"] : []),
@@ -35,12 +37,17 @@
     ...(s.replace.enough ? ["try"] : []),
     "goals",
   ]);
-  const goals = [
-    { title: "Win more", detail: "What's actually costing me games", id: "why_losing", label: "Why do I keep losing?" },
-    { title: "Find a better deck", detail: "My best deck, and one proven at my trophies", id: "best_deck", label: "What's my best deck?" },
-    { title: "Fix my deck", detail: "Which card to change", id: "replace_card", label: "Which card should I replace?" },
-    { title: "Beat what's beating me", detail: "The cards giving me trouble", id: "nemesis", label: "Which cards beat me the most?" },
+  const goals: { title: string; detail: string; id: string; label: string; icon: IconName }[] = [
+    { title: "Win more", detail: "What's actually costing me games", id: "why_losing", label: "Why do I keep losing?", icon: "trophy" },
+    { title: "Find a better deck", detail: "One proven at my trophies", id: "best_deck", label: "What's my best deck?", icon: "cards" },
+    { title: "Fix my deck", detail: "Which card to change", id: "replace_card", label: "Which card should I replace?", icon: "swap" },
+    { title: "Beat what's beating me", detail: "The cards giving me trouble", id: "nemesis", label: "Which cards beat me the most?", icon: "shield" },
   ];
+  // Card art that makes a goal concrete: the card that beats them, or the card to swap.
+  const goalArt = (id: string): Card | undefined =>
+    id === "nemesis" ? s.worst?.rows?.[0] : id === "replace_card" ? s.replace?.weakest ?? undefined : undefined;
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const evolved = $derived(o.deck.filter((c) => c.status));
 
   const WIDE = "(min-width: 1024px)";
   let wide = $state(matchMedia(WIDE).matches);
@@ -53,6 +60,7 @@
   // On a wide screen the cards pair up into sections you scroll through.
   const sectionNames: Record<string, string> = {
     you: "Overview",
+    wow: "Surprises",
     deck: "Deck",
     trend: "Form",
     close: "Close games",
@@ -126,9 +134,9 @@
             </div>
             <p class="text-lg leading-snug text-center">{report.intro}</p>
             <div class="grid grid-cols-3 divide-x divide-base-content/10 text-center">
-              <div><div class="stat-num text-2xl text-primary">{o.player.trophies?.toLocaleString() ?? "—"}</div><div class="text-xs text-base-content/60 mt-1">Trophies</div></div>
-              <div><div class="stat-num text-2xl">{Math.round(o.record.win_rate * 100)}%</div><div class="text-xs text-base-content/60 mt-1">Won {o.record.wins} of {o.record.games}</div></div>
-              <div><div class="stat-num text-2xl" class:text-success={o.net_trophies > 0} class:text-error={o.net_trophies < 0}>{o.net_trophies > 0 ? "+" : ""}{o.net_trophies}</div><div class="text-xs text-base-content/60 mt-1">Trophies gained</div></div>
+              <div><Icon name="trophy" class="w-5 h-5 mx-auto mb-1 text-primary" /><div class="stat-num text-2xl text-primary">{o.player.trophies?.toLocaleString() ?? "—"}</div><div class="text-xs text-base-content/60 mt-1">Trophies</div></div>
+              <div><Icon name="crown" class="w-5 h-5 mx-auto mb-1 text-accent" /><div class="stat-num text-2xl">{Math.round(o.record.win_rate * 100)}%</div><div class="text-xs text-base-content/60 mt-1">Won {o.record.wins} of {o.record.games}</div></div>
+              <div><Icon name="trend" class="w-5 h-5 mx-auto mb-1 {o.net_trophies >= 0 ? 'text-success' : 'text-error'}" /><div class="stat-num text-2xl" class:text-success={o.net_trophies > 0} class:text-error={o.net_trophies < 0}>{o.net_trophies > 0 ? "+" : ""}{o.net_trophies}</div><div class="text-xs text-base-content/60 mt-1">Trophies gained</div></div>
             </div>
             {#if thin}
               <p class="text-sm text-center text-base-content/70" data-testid="thin">{o.record.games ? `I've only got ${o.record.games} ${o.record.games === 1 ? "game" : "games"} to go on, so some cards stay hidden until you play more.` : "Play a few games and come back. I'll have plenty to say."}</p>
@@ -136,6 +144,61 @@
             {#if report.similar?.enough}
               <p class="text-xs text-center text-base-content/60" data-testid="similar">Compared with {report.similar.battles.toLocaleString()} similar battles from {report.similar.players.toLocaleString()} players{report.similar.near ? " near your trophies" : ""}, last {report.similar.days} days.</p>
             {/if}
+          {:else if id === "wow"}
+            <h2 class="text-2xl lg:text-3xl flex items-center gap-2"><Icon name="sparkle" class="w-6 h-6 text-primary" />Things you didn't know</h2>
+            <ul class="grid gap-3" data-testid="surprises">
+              {#each s.surprises as x (x.kind)}
+                <li class="panel p-3 flex items-center gap-3.5" data-kind={x.kind}>
+                  <div class="w-16 lg:w-20 shrink-0 relative">
+                    {#if x.kind === "signature_card"}
+                      {@render tile(x.card)}
+                      <span class="absolute -top-1.5 -right-1.5 rounded-full bg-primary text-primary-content p-1"><Icon name="star" class="w-3.5 h-3.5" /></span>
+                    {:else if x.kind === "free_wins"}
+                      {@render tile(x.cards[0])}
+                      <span class="absolute -bottom-1.5 inset-x-0 mx-auto w-fit rounded-full bg-success text-success-content text-xs font-bold px-1.5 stat-num">{x.cards[0].wins}–{x.cards[0].games - x.cards[0].wins}</span>
+                    {:else if x.kind === "unique_deck"}
+                      <div class="grid grid-cols-2 gap-0.5">{#each x.deck as c (c.id)}<CardTile card={c} />{/each}</div>
+                    {:else if x.kind === "evolution_gap"}
+                      {#if evolved.length}
+                        <div class="grid grid-cols-2 gap-0.5">{#each evolved.slice(0, 4) as c (c.id)}<CardTile card={c} />{/each}</div>
+                      {:else}
+                        <div class="aspect-square rounded-xl bg-accent/15 text-accent grid place-items-center"><Icon name="bolt" class="w-8 h-8" /></div>
+                      {/if}
+                    {/if}
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="font-semibold leading-tight">{x.headline}</div>
+                    {#if x.kind === "signature_card" || x.kind === "evolution_gap"}
+                      {@const bars = x.kind === "signature_card"
+                        ? [{ label: "You", v: x.record.win_rate, tone: "bg-primary" }, { label: "Others", v: x.field_win_rate, tone: "bg-base-content/30" }]
+                        : [{ label: `< ${x.your_evolutions} evos`, v: x.fewer.win_rate, tone: "bg-success" }, { label: `${x.your_evolutions} evos`, v: x.matched.win_rate, tone: "bg-error" }]}
+                      <div class="mt-2 space-y-1">
+                        {#each bars as b (b.label)}
+                          <div class="flex items-center gap-2 text-xs">
+                            <span class="w-14 shrink-0 text-base-content/70">{b.label}</span>
+                            <div class="flex-1 h-2 rounded-full bg-base-content/10 overflow-hidden"><div class="h-full rounded-full {b.tone}" style="width: {b.v * 100}%"></div></div>
+                            <span class="w-9 text-right stat-num">{pct(b.v)}</span>
+                          </div>
+                        {/each}
+                      </div>
+                      <p class="text-xs text-base-content/60 mt-1.5">{x.kind === "signature_card" ? `${x.record.games} of your games vs ${x.field_games.toLocaleString()} at your trophies` : `Your win rate by how many evolved cards they bring. You bring ${x.your_evolutions}.`}</p>
+                    {:else if x.kind === "unique_deck"}
+                      <div class="mt-1 flex items-baseline gap-1.5"><span class="stat-num text-2xl text-primary">{x.players_alike.toLocaleString()}</span><span class="text-sm text-base-content/70">of {x.players_total.toLocaleString()} players</span></div>
+                      <p class="text-xs text-base-content/60">at your trophies ran {x.shared_cards} of your 8 cards this week</p>
+                    {:else}
+                      <p class="text-sm text-base-content/70 mt-1">{x.detail}</p>
+                      {#if x.cards.length > 1}
+                        <div class="flex gap-3 mt-2">
+                          {#each x.cards.slice(1) as c (c.id)}
+                            <div class="flex items-center gap-1.5"><div class="w-7">{@render tile(c)}</div><span class="text-xs stat-num text-success">{c.wins}–{c.games - c.wins}</span></div>
+                          {/each}
+                        </div>
+                      {/if}
+                    {/if}
+                  </div>
+                </li>
+              {/each}
+            </ul>
           {:else if id === "deck"}
             <h2 class="text-2xl lg:text-3xl">Your deck</h2>
             <div class="grid grid-cols-4 gap-x-3 gap-y-4">
@@ -167,8 +230,9 @@
               <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid {swap ? 'grid-cols-[1fr_auto_1fr]' : 'grid-cols-1'} items-center gap-3">
                 <div class="w-20 mx-auto">{@render tile(weak, weak.name)}</div>
                 {#if swap}
-                  <span class="text-primary text-xl" aria-hidden="true">→</span>
+                  <Icon name="swap" class="w-6 h-6 text-primary" />
                   <div class="w-20 mx-auto">{@render tile(swap, swap.name)}</div>
+                  <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks like yours</span></div>
                 {/if}
               </div>
             {/if}
@@ -179,8 +243,11 @@
             </div>
             <div class="grid gap-2.5">
               {#each goals as g (g.id)}
-                <button class="panel px-4 py-4 text-left cursor-pointer flex items-center justify-between gap-3 hover:border-primary/60" onclick={() => onGoal(g.label, g.id)}>
-                  <span><span class="block text-base font-semibold">{g.title}</span><span class="block text-sm text-base-content/70">{g.detail}</span></span>
+                {@const art = goalArt(g.id)}
+                <button class="panel px-4 py-3 text-left cursor-pointer flex items-center gap-3 hover:border-primary/60" onclick={() => onGoal(g.label, g.id)}>
+                  <span class="w-10 h-10 shrink-0 rounded-xl bg-primary/15 text-primary grid place-items-center"><Icon name={g.icon} class="w-5 h-5" /></span>
+                  <span class="flex-1 min-w-0"><span class="block text-base font-semibold">{g.title}</span><span class="block text-sm text-base-content/70">{g.detail}</span></span>
+                  {#if art}<span class="w-8 shrink-0"><CardTile card={art} /></span>{/if}
                   <span class="text-primary text-lg" aria-hidden="true">→</span>
                 </button>
               {/each}

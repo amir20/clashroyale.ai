@@ -285,7 +285,15 @@ def test_overview_shows_similar_battles_and_card_status(db_path: Path) -> None:
         report = events(c.get(f"/api/players/{ME[1:]}/load").text)[-1]["report"]
     assert set(report["similar"]) == {"battles", "players", "days", "enough", "near"}
     assert all("status" in card for card in report["overview"]["deck"])
-    assert set(report["story"]) == {"trend", "close", "worst", "elixir", "replace", "lines"}
+    assert set(report["story"]) == {
+        "surprises",
+        "trend",
+        "close",
+        "worst",
+        "elixir",
+        "replace",
+        "lines",
+    }
     assert report["cards"]
 
 

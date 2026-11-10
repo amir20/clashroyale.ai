@@ -27,6 +27,7 @@ export type Report = {
     worst: any | null;
     elixir: any | null;
     replace: any;
+    surprises: (Record<string, any> & { kind: string; headline: string; detail: string })[];
     lines: { trend: string | null; close: string | null; worst: string | null; elixir: string | null; replace: string };
   };
   cards: Card[];

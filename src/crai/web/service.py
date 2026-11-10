@@ -144,7 +144,9 @@ class Service:
         worst = usable(visuals.worst_matchups_view(a, items))
         elixir = usable(visuals.elixir_view(a, items))
         replace = insights.replace_card(a, tag, items)
+        found = insights.surprises(a, tag, items)
         return {
+            "surprises": [x | voice.surprise(x) for x in found],
             "trend": trend,
             "close": close,
             "worst": worst,
@@ -155,7 +157,7 @@ class Service:
                 "close": voice.close_games(close) if close else None,
                 "worst": voice.worst_matchups(worst) if worst else None,
                 "elixir": voice.elixir(elixir) if elixir else None,
-                "replace": voice.replace_card(replace),
+                "replace": voice.try_line(replace),
             },
         }
 

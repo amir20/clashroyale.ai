@@ -786,3 +786,154 @@ def field_size(a: Analyzer, items: list[Game]) -> dict[str, Any]:
             "near_means": trophy_scope(items),
         }
     return out
+
+
+# ---------------------------------------------------------------- things they didn't know
+
+MIN_SIGNATURE_GAMES = 20
+MIN_SIGNATURE_GAP = 0.08  # beat players at their trophies by at least this much with a card
+MIN_FREE_WIN_GAMES = 8
+FREE_WIN_RATE = 0.8
+UNIQUE_DECK_SHARED = 6
+MAX_LOOKALIKES = 10  # at most this many players at their trophies run a near-copy
+MIN_UNIQUE_FIELD = 10_000
+MIN_EVO_GAMES = 15
+MIN_EVO_GAP = 0.1
+MAX_SURPRISES = 4
+
+
+def _z(diff: float, n1: int, n2: int | None = None) -> float:
+    """How many standard errors a gap is: the ranking for 'most surprising'."""
+    se = (0.25 / n1 + (0.25 / n2 if n2 else 0.0)) ** 0.5
+    return abs(diff) / se if se else 0.0
+
+
+def signature_card(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
+    """The card they win with far more often than players at their trophies do."""
+    field = near_player(a.decks(), items)
+    if field is None or field.height < MIN_FAMILY_DECKS:
+        field = a.decks()
+    cards = _cards(a)
+    played: defaultdict[int, list[Game]] = defaultdict(list)
+    for g in items:
+        for cid in _ids(g["deck_key"]):
+            played[cid].append(g)
+    used = [c for c, gs in played.items() if len(gs) >= MIN_SIGNATURE_GAMES and c in cards]
+    if not used:
+        return None
+    rates = (
+        field.explode("cards")
+        .filter(pl.col("cards").is_in(used))
+        .group_by("cards")
+        .agg(games=pl.len(), rate=pl.col("score").mean())
+    )
+    best: dict[str, Any] | None = None
+    best_z = 0.0
+    for r in rates.iter_rows(named=True):
+        gs = played[r["cards"]]
+        diff = _rate(gs) - r["rate"]
+        if diff >= MIN_SIGNATURE_GAP and diff > _margin(len(gs)):
+            z = _z(diff, len(gs))
+            if z > best_z:
+                best_z = z
+                best = {
+                    "kind": "signature_card",
+                    "score": round(z, 2),
+                    "card": cards[r["cards"]],
+                    "record": _record(gs),
+                    "field_win_rate": round(r["rate"], 3),
+                    "field_games": r["games"],
+                }
+    return best
+
+
+def unique_deck(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | None:
+    """Almost nobody at their trophies plays anything like their deck."""
+    key = current_deck_key(items)
+    field = near_player(a.decks(), items)
+    if key is None or field is None:
+        return None
+    mine = _ids(key)
+
+    def count() -> tuple[int, int]:
+        others = field.filter(pl.col("player_tag") != tag)
+        shared = others.with_columns(s=pl.col("cards").list.set_intersection(mine).list.len())
+        alike = shared.filter(pl.col("s") >= UNIQUE_DECK_SHARED)["player_tag"].n_unique()
+        return alike, others["player_tag"].n_unique()
+
+    alike, total = a._cached(("unique", tag, key), count)
+    if total < MIN_UNIQUE_FIELD or alike > MAX_LOOKALIKES:
+        return None
+    return {
+        "kind": "unique_deck",
+        "score": 4.0,  # rare and fun, but it's a fact about the deck, not a result
+        "players_alike": alike,
+        "players_total": total,
+        "shared_cards": UNIQUE_DECK_SHARED,
+        "deck": overview(a, tag, items)["deck"][:4],
+    }
+
+
+def free_wins(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
+    """Opponent cards they almost always beat."""
+    rows = [
+        r
+        for r in nemesis(a, items, min_games=MIN_FREE_WIN_GAMES)["best"]
+        if r["win_rate"] >= FREE_WIN_RATE and r["diff"] > r["margin"]
+    ]
+    if not rows:
+        return None
+    return {
+        "kind": "free_wins",
+        "score": round(max(_z(r["diff"], r["games"]) for r in rows), 2),
+        "cards": rows[:3],
+    }
+
+
+def evolution_gap(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | None:
+    """How they do when the opponent has as many evolved cards as they do, or more."""
+    ids = [g["battle_id"] for g in items]
+    if not ids:
+        return None
+    rows = a.query(
+        f"""SELECT battle_id, player_tag = ? AS me, sum(coalesce(evolution_level, 0) > 0) AS evo
+            FROM participant_cards WHERE kind = 'deck' AND battle_id IN ({",".join("?" * len(ids))})
+            GROUP BY 1, 2""",
+        (normalize_tag(tag), *ids),
+    ).to_dicts()
+    evos: defaultdict[int, dict[int, int]] = defaultdict(dict)
+    for r in rows:
+        evos[r["battle_id"]][r["me"]] = r["evo"]
+    known = [g for g in items if len(evos[g["battle_id"]]) == 2]
+    matched = [g for g in known if evos[g["battle_id"]][0] >= evos[g["battle_id"]][1]]
+    fewer = [g for g in known if evos[g["battle_id"]][0] < evos[g["battle_id"]][1]]
+    if min(len(matched), len(fewer)) < MIN_EVO_GAMES:
+        return None
+    diff = _rate(fewer) - _rate(matched)
+    margin = 1.96 * (0.25 / len(matched) + 0.25 / len(fewer)) ** 0.5
+    if diff < MIN_EVO_GAP or diff <= margin:
+        return None
+    return {
+        "kind": "evolution_gap",
+        "score": round(_z(diff, len(matched), len(fewer)), 2),
+        "your_evolutions": median(evos[g["battle_id"]][1] for g in known),
+        "matched": _record(matched),
+        "fewer": _record(fewer),
+    }
+
+
+def surprises(a: Analyzer, tag: str, items: list[Game]) -> list[dict[str, Any]]:
+    """Up to four things about their games they couldn't see in the game, most striking first.
+
+    Each one is only included when the games prove it.
+    """
+    tag = normalize_tag(tag)
+    if not items:
+        return []
+    found = [
+        signature_card(a, items),
+        unique_deck(a, tag, items),
+        free_wins(a, items),
+        evolution_gap(a, tag, items),
+    ]
+    return sorted((f for f in found if f), key=lambda f: f["score"], reverse=True)[:MAX_SURPRISES]

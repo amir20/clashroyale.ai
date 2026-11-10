@@ -1,5 +1,6 @@
 <script lang="ts">
   import CardTile from "./CardTile.svelte";
+  import Icon from "./Icon.svelte";
 
   // Drawn from figures the server computed; the model only chooses which visual to show.
   let { visual: v, onCard, titled = true }: { visual: any; onCard?: (card: any) => void; titled?: boolean } = $props();
@@ -133,7 +134,10 @@
               {#if d.current}
                 <span class="font-semibold text-primary">Your deck now</span>
               {:else if d.added.length > 2}
-                <span>A very different deck <span class="text-base-content/60">· {d.added.length} cards changed</span></span>
+                <div class="flex items-center gap-1 min-w-0" data-testid="deck-new-cards" aria-label={`${d.added.length} different cards: ${names(d.added)}`}>
+                  {#each d.added.slice(0, 6) as c (c.id)}<div class="w-7 lg:w-9 shrink-0">{@render tile(c)}</div>{/each}
+                  <span class="text-xs text-base-content/60 ml-1 whitespace-nowrap">{d.added.length} new</span>
+                </div>
               {:else}
                 <div class="flex items-center gap-1.5" data-testid="deck-change">
                   {#each d.removed as c (c.id)}<div class="w-10 lg:w-14 opacity-75">{@render tile(c)}</div>{/each}
@@ -188,7 +192,7 @@
     {/if}
   {:else if v.type === "close_games"}
     {@const c = v.close_games}
-    <div class="text-xs text-base-content/60">Your one-crown games</div>
+    <div class="text-xs text-base-content/60 flex items-center gap-1"><Icon name="crown" class="w-3.5 h-3.5 text-primary" />Your one-crown games</div>
     <div class="stat-num text-2xl mt-0.5">Won {c.wins} of {c.games}</div>
     <div class="flex h-2 gap-0.5 mt-2 rounded-full overflow-hidden" aria-hidden="true">
       {#if c.wins}<div class="bg-success" style="width: {(c.wins / c.games) * 100}%"></div>{/if}
@@ -196,17 +200,17 @@
     </div>
     <div class="grid grid-cols-2 gap-3 mt-4 text-center">
       <div>
-        <div class="stat-num text-lg">{v.elixir_leaked_close_wins?.toFixed(1) ?? "—"}</div>
+        <div class="stat-num text-lg flex items-center justify-center gap-1"><Icon name="elixir" class="w-4 h-4 text-fuchsia-400" />{v.elixir_leaked_close_wins?.toFixed(1) ?? "—"}</div>
         <div class="text-xs text-base-content/60">Elixir wasted when you win them</div>
       </div>
       <div>
-        <div class="stat-num text-lg">{v.elixir_leaked_close_losses?.toFixed(1) ?? "—"}</div>
+        <div class="stat-num text-lg flex items-center justify-center gap-1"><Icon name="elixir" class="w-4 h-4 text-fuchsia-400" />{v.elixir_leaked_close_losses?.toFixed(1) ?? "—"}</div>
         <div class="text-xs text-base-content/60">Elixir wasted when you lose them</div>
       </div>
     </div>
     <p class="text-xs text-base-content/60 mt-3">Typical game. For comparison, {v.elixir_leaked_three_crowned?.toFixed(1) ?? "—"} when you get three-crowned.</p>
   {:else if v.type === "elixir"}
-    <div class="stat-num text-2xl">{v.avg_elixir} elixir</div>
+    <div class="stat-num text-2xl flex items-center gap-1.5"><Icon name="elixir" class="w-6 h-6 text-fuchsia-400" />{v.avg_elixir} elixir</div>
     <div class="text-xs text-base-content/60 mt-0.5">
       {v.higher_than >= 0.5 ? `Costs more than ${pct(v.higher_than)} of decks` : `Cheaper than ${pct(1 - v.higher_than)} of decks`} · the average deck is {v.average_deck}
     </div>

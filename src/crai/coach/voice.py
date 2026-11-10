@@ -103,6 +103,24 @@ def replace_card(r: dict[str, Any]) -> str:
     return msg
 
 
+def try_line(r: dict[str, Any]) -> str:
+    """The short version of replace_card, for the story card under the swap art."""
+    if not r.get("enough") or r.get("weakest") is None:
+        return replace_card(r)
+    weak = r["weakest"]
+    if r["candidates"]:
+        c = r["candidates"][0]
+        return (
+            f"Test {c['name']} for {weak['name']}. Decks like yours with it win "
+            f"{_per_100(c['gain'])}. Could still be a fluke, so give it 20 games."
+        )
+    if weak["real"]:
+        return (
+            f"{weak['name']} is costing you: decks like yours win {_per_100(weak['gain'])} with it."
+        )
+    return "None of your cards is hurting you. Your losses come from somewhere else."
+
+
 def best_cards(r: dict[str, Any]) -> str:
     best = r["best"]
     if best is None:
@@ -414,3 +432,43 @@ def game_plan(r: dict[str, Any]) -> str:
         )
     lines = [_problem_line(k, r["findings"][k]) for k in real[:2]]
     return " ".join(line for line in lines if line)
+
+
+def surprise(x: dict[str, Any]) -> dict[str, str]:
+    """A headline and one line of proof for something the player couldn't see in the game."""
+    match x["kind"]:
+        case "signature_card":
+            r, name = x["record"], x["card"]["name"]
+            return {
+                "headline": f"You're a {name} specialist",
+                "detail": (
+                    f"You win {_pct(r['win_rate'])} with it over {r['games']} games. "
+                    f"Players at your trophies: {_pct(x['field_win_rate'])}."
+                ),
+            }
+        case "unique_deck":
+            alike = "Nobody" if x["players_alike"] == 0 else f"Only {x['players_alike']}"
+            return {
+                "headline": "Nobody plays your deck",
+                "detail": (
+                    f"{alike} of {x['players_total']:,} players at your trophies this week "
+                    f"ran {x['shared_cards']} of your 8 cards."
+                ),
+            }
+        case "free_wins":
+            c = x["cards"][0]
+            losses = c["games"] - c["wins"]
+            return {
+                "headline": f"{c['name']} is a free win",
+                "detail": f"You're {c['wins']}-{losses} when they bring it.",
+            }
+        case "evolution_gap":
+            m, f = x["matched"], x["fewer"]
+            return {
+                "headline": "Evolutions are your wall",
+                "detail": (
+                    f"When they match your {x['your_evolutions']} evolved cards you win "
+                    f"{_pct(m['win_rate'])}. When they have fewer: {_pct(f['win_rate'])}."
+                ),
+            }
+    return {"headline": "", "detail": ""}
