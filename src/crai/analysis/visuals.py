@@ -18,6 +18,7 @@ from crai.analysis.insights import (
     _cards,
     _ids,
     _record,
+    compared,
     current_deck_key,
     elixir_standing,
     near_filters,
@@ -249,7 +250,7 @@ def proven_for_player(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
         for n in (3, 2, 1):
             kept = favorites[:n]
             if decks := proven_decks(a, [str(c) for c in kept], 1, where):
-                return _deck_card(a, decks[0], label) | {
+                return _deck_card(a, decks[0], label, items) | {
                     "kept": [names[c]["name"] for c in kept if c in names]
                 }
     return None
@@ -260,12 +261,17 @@ def deck_view(a: Analyzer, wanted: list[str], items: list[Game] | None = None) -
     decks, scope = near_proven_decks(a, wanted, items)
     if not decks:
         return {"error": "No deck with those cards has been won with by enough different players."}
-    return _deck_card(a, decks[0], scope)
+    return _deck_card(a, decks[0], scope, items)
 
 
-def _deck_card(a: Analyzer, d: DeckResult, scope: str) -> dict[str, Any]:
-    by_name = {c["name"]: c for c in _cards(a).values()}
+def _deck_card(
+    a: Analyzer, d: DeckResult, scope: str, items: list[Game] | None = None
+) -> dict[str, Any]:
+    cards = _cards(a)
+    by_name = {c["name"]: c for c in cards.values()}
     shown = [by_name[n] for n in d["cards"]]
+    if items:  # mark which of these the player already runs
+        shown = compared(cards, [c["id"] for c in shown], set(_ids(current_deck_key(items))))
     ids = ";".join(str(c["id"]) for c in shown)
     return {
         "type": "deck",

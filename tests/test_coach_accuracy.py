@@ -7,7 +7,7 @@ import pytest
 from conftest import HOG, ME, PEKKA
 
 from crai.analysis import insights, visuals
-from crai.analysis.analytics import Analyzer, CardNotFound
+from crai.analysis.analytics import Analyzer, CardNotFound, Filters
 from crai.coach import voice
 from crai.coach.tools import CoachContext, player_tools
 
@@ -309,3 +309,22 @@ def test_surprise_words_for_every_kind() -> None:
     for x in examples:
         assert voice.surprise(x)["headline"]
     assert voice.surprise(examples[2])["detail"] == "You're 10-0 when they bring it."
+
+
+def test_compared_decks_mark_the_cards_the_player_runs(analyzer: Analyzer) -> None:
+    items = insights.games(analyzer, ME)
+    mine = set(insights._ids(insights.current_deck_key(items)))
+    for d in insights.best_deck(analyzer, items)["decks"]:
+        assert len(d["cards"]) == 8
+        assert all(c["yours"] == (c["id"] in mine) for c in d["cards"])
+        # cards they already run come first, so the different ones line up at the end
+        flags = [c["yours"] for c in d["cards"]]
+        assert flags == sorted(flags, reverse=True)
+
+
+def test_trophy_range_does_not_cache_a_copy_per_player(analyzer: Analyzer) -> None:
+    analyzer.decks()
+    before = len(analyzer._cache)
+    for low in (1000, 2000, 3000):
+        analyzer.decks(Filters(battle_types=("trail",), min_trophies=low, max_trophies=low + 500))
+    assert len(analyzer._cache) <= before + 1

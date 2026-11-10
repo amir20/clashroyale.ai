@@ -126,3 +126,21 @@ async def test_only_a_few_players_are_in_progress_at_once(tmp_path: Path) -> Non
     assert stats.players_fetched == len(tags)
     assert c.parallelism == 2
     assert peak <= 2  # the per-key limit still holds
+
+
+async def test_rook_users_are_refreshed_often_but_never_become_seeds(tmp_path: Path) -> None:
+    path = tmp_path / "c.db"
+    async with client(httpx.MockTransport(handler)) as c:
+        with db.session(path) as conn:
+            await crawl(c, conn, CrawlParams(top=1, depth=2))
+            db.track_player(conn, "#PP")
+            # #PP was just fetched, so a 2-hour refresh leaves it alone...
+            again = await crawl(c, conn, CrawlParams(top=0, depth=0))
+            assert again.tracked_refreshed == 0
+            # ...but once it's stale it is fetched first, outside the crawl's budget.
+            conn.execute("UPDATE players SET battlelog_fetched_at = '2000-01-01T00:00:00Z'")
+            stale = await crawl(c, conn, CrawlParams(top=0, depth=0, max_players=0))
+            seeds = {r[0] for r in conn.execute("SELECT tag FROM players WHERE is_seed = 1")}
+    assert stale.tracked_refreshed == 1
+    assert stale.players_fetched == 1
+    assert "#PP" not in seeds

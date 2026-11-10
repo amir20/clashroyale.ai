@@ -110,6 +110,7 @@ class Service:
             db.upsert_player(conn, profile)
             new = db.ingest_battlelog(conn, battles)
             db.mark_battlelog_fetched(conn, tag)
+            db.track_player(conn, tag)
         snapshot.sync(self.settings.db_path)
         return new
 

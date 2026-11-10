@@ -49,6 +49,9 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
         columns = {r[1] for r in conn.execute("PRAGMA table_info(cards)")}
         if "hero_icon_url" not in columns:  # added after v3 shipped
             conn.execute("ALTER TABLE cards ADD COLUMN hero_icon_url TEXT")
+        player_columns = {r[1] for r in conn.execute("PRAGMA table_info(players)")}
+        if "is_tracked" not in player_columns:  # players who use Rook, added after v3 shipped
+            conn.execute("ALTER TABLE players ADD COLUMN is_tracked INTEGER NOT NULL DEFAULT 0")
         if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.row_factory = sqlite3.Row
@@ -237,6 +240,21 @@ def upsert_player(
         )
 
 
+def track_player(conn: sqlite3.Connection, tag: str) -> None:
+    """Remember someone who used Rook: their games are kept and refreshed often."""
+    conn.execute("UPDATE players SET is_tracked = 1 WHERE tag = ?", (tag,))
+
+
+def tracked_players(conn: sqlite3.Connection, stale_before: str) -> list[str]:
+    """Players who use Rook whose battle log is older than `stale_before` (or never fetched)."""
+    rows = conn.execute(
+        """SELECT tag FROM players WHERE is_tracked = 1
+             AND (battlelog_fetched_at IS NULL OR battlelog_fetched_at < ?)""",
+        (stale_before,),
+    )
+    return [r[0] for r in rows]
+
+
 def mark_battlelog_fetched(conn: sqlite3.Connection, tag: str) -> None:
     ts = now_iso()
     conn.execute(
@@ -387,9 +405,10 @@ def opponents_of(conn: sqlite3.Connection, tag: str) -> list[str]:
 
 
 def prune_battles(conn: sqlite3.Connection, days: int) -> int:
-    """Delete battles older than `days`, keeping every battle a seed player was in.
+    """Delete battles older than `days`, keeping every battle a seed or tracked player was in.
 
-    Seeds are the top players and you, so your own history is never removed. Freed pages are
+    Seeds are the top players and you, and tracked players are everyone who has used Rook, so
+    their own history is never removed. Freed pages are
     reused by later crawls, so the database file stops growing instead of shrinking.
     """
     cutoff = f"-{days} days"
@@ -398,7 +417,7 @@ def prune_battles(conn: sqlite3.Connection, days: int) -> int:
            WHERE b.battle_time < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)
              AND NOT EXISTS (
                SELECT 1 FROM battle_participants bp JOIN players p ON p.tag = bp.player_tag
-               WHERE bp.battle_id = b.id AND p.is_seed = 1)""",
+               WHERE bp.battle_id = b.id AND (p.is_seed = 1 OR p.is_tracked = 1))""",
         (cutoff,),
     ).fetchall()
     ids = [(r[0],) for r in old]

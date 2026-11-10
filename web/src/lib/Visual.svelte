@@ -25,12 +25,19 @@
   };
 </script>
 
-{#snippet tile(c: any)}
+{#snippet tile(c: any, dim = false)}
   {#if onCard}
-    <button class="block w-full cursor-pointer transition active:scale-95" aria-label={`More about ${c.name}`} onclick={() => onCard(c)}><CardTile card={c} /></button>
+    <button class="block w-full cursor-pointer transition active:scale-95" aria-label={`More about ${c.name}`} onclick={() => onCard(c)}><CardTile card={c} {dim} /></button>
   {:else}
-    <CardTile card={c} />
+    <CardTile card={c} {dim} />
   {/if}
+{/snippet}
+
+{#snippet legend()}
+  <p class="flex items-center gap-3 text-xs text-base-content/60" data-testid="compare-legend">
+    <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-3 rounded-sm bg-base-content/25"></span>In your deck now</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-3 rounded-sm bg-primary"></span>Different</span>
+  </p>
 {/snippet}
 
 <div class="rounded-xl bg-base-100 border border-base-content/10 p-4" data-testid={`visual-${v.type}`}>
@@ -97,8 +104,9 @@
     {/if}
   {:else if v.type === "deck"}
     <div class="grid grid-cols-4 gap-2 max-w-xs mx-auto">
-      {#each v.cards as c (c.id)}{@render tile(c)}{/each}
+      {#each v.cards as c (c.id)}{@render tile(c, !!c.yours)}{/each}
     </div>
+    {#if v.cards.some((c: any) => c.yours)}<div class="flex justify-center mt-2">{@render legend()}</div>{/if}
     <p class="text-center text-sm mt-3">
       <span class="stat-num">{pct(v.win_rate)}</span> wins · {v.games.toLocaleString()} games · {v.players.toLocaleString()} players · {v.avg_elixir} elixir
     </p>
@@ -126,26 +134,21 @@
     <p class="text-xs text-base-content/60 mt-3">Games where your opponent had each card. You win {pct(v.overall_win_rate)} overall.{v.rows.some((c: any) => !c.real) ? " Faded cards: too few games to be sure." : ""}</p>
   {:else if v.type === "trend"}
     {#if v.verdict === "changed_decks"}
-      <h4 class="text-sm font-semibold mb-3">Decks you've played, oldest first</h4>
+      <h4 class="text-sm font-semibold">Decks you've played, oldest first</h4>
+      <div class="mt-1 mb-3">{@render legend()}</div>
       <ul class="space-y-3 lg:space-y-6">
         {#each v.decks as d, i (i)}
           <li>
-            <div class="flex items-center justify-between gap-3 text-sm">
+            <div class="flex items-center justify-between gap-3 text-sm mb-1.5">
               {#if d.current}
                 <span class="font-semibold text-primary">Your deck now</span>
-              {:else if d.added.length > 2}
-                <div class="flex items-center gap-1 min-w-0" data-testid="deck-new-cards" aria-label={`${d.added.length} different cards: ${names(d.added)}`}>
-                  {#each d.added.slice(0, 6) as c (c.id)}<div class="w-7 lg:w-9 shrink-0">{@render tile(c)}</div>{/each}
-                  <span class="text-xs text-base-content/60 ml-1 whitespace-nowrap">{d.added.length} new</span>
-                </div>
               {:else}
-                <div class="flex items-center gap-1.5" data-testid="deck-change">
-                  {#each d.removed as c (c.id)}<div class="w-10 lg:w-14 opacity-75">{@render tile(c)}</div>{/each}
-                  <span class="text-primary px-0.5" aria-label="replaced by">→</span>
-                  {#each d.added as c (c.id)}<div class="w-10 lg:w-14">{@render tile(c)}</div>{/each}
-                </div>
+                <span class="text-base-content/70">{d.added.length} {d.added.length === 1 ? "card" : "cards"} different</span>
               {/if}
               <span class="stat-num shrink-0">{d.wins}–{d.losses}</span>
+            </div>
+            <div class="grid grid-cols-8 gap-1" data-testid="deck-compare" aria-label={d.current ? "Your deck now" : `${names(d.added)} instead of ${names(d.removed)}`}>
+              {#each d.cards as c (c.id)}{@render tile(c, !d.current && c.yours)}{/each}
             </div>
             {#if !d.current && d.added.length <= 2}
               <p class="text-sm mt-1.5" data-testid="deck-change-text">{names(d.added)} instead of {names(d.removed)}</p>

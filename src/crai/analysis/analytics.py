@@ -10,7 +10,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Hashable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
 from pathlib import Path
@@ -243,9 +243,20 @@ class Analyzer:
         if key != self._base_key or self._base_df is None:
             _, raw = snapshot.read(self.db_path, self.window_days)
             # rechunk: Parquet parts arrive as several chunks, which makes list ops ~3x slower.
-            self._base_df = raw.with_columns(
-                is_top=pl.col("player_tag").is_in(seeds).cast(pl.Int8())
-            ).rechunk()
+            # Repeated strings become categories and floats shrink: about half the memory, so
+            # the server can hold twice the battles.
+            self._base_df = (
+                raw.with_columns(
+                    is_top=pl.col("player_tag").is_in(seeds).cast(pl.Int8()),
+                    score=pl.col("score").cast(pl.Float32()),
+                )
+                .with_columns(
+                    pl.col("player_tag", "deck_key", "battle_type", "deck_selection").cast(
+                        pl.Categorical()
+                    )
+                )
+                .rechunk()
+            )
             self._base_key = key
             self._cache.clear()
         return self._base_df
@@ -368,7 +379,10 @@ class Analyzer:
     def decks(self, f: Filters = DEFAULT_FILTERS) -> pl.DataFrame:
         """One row per (battle, player) with an 8-card deck in a 1v1 battle."""
         base = self._base()
-        return self._cached(("decks", f), lambda: self._filter(base, f))
+        # Trophy limits are applied later (in _subject), so leave them out of the cache key:
+        # otherwise every player's trophy range would cache its own copy of the whole table.
+        key = replace(f, min_trophies=None, max_trophies=None)
+        return self._cached(("decks", key), lambda: self._filter(base, key))
 
     @staticmethod
     def _filter(d: pl.DataFrame, f: Filters) -> pl.DataFrame:

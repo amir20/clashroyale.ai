@@ -267,6 +267,7 @@ def _decks_over_time(a: Analyzer, items: list[Game]) -> list[dict[str, Any]]:
             "current": key == current,
             "added": named(set(_ids(key)) - now),  # compared with the deck they play now
             "removed": named(now - set(_ids(key))),
+            "cards": compared(cards, _ids(key), now),
         }
         for key, gs in grouped.items()
         if len(gs) >= MIN_DECK_TIMELINE_GAMES
@@ -607,8 +608,20 @@ def record_with(a: Analyzer, items: list[Game], card: str | int) -> dict[str, An
     }
 
 
+def compared(
+    cards: dict[int, dict[str, Any]], ids: list[int], now: set[int]
+) -> list[dict[str, Any]]:
+    """All 8 cards of a deck, each marked with whether the player's current deck has it.
+
+    Cards they already run come first, so the different ones line up at the end.
+    """
+    shown = [cards[c] | {"yours": c in now} for c in ids if c in cards]
+    return sorted(shown, key=lambda c: not c["yours"])
+
+
 def best_deck(a: Analyzer, items: list[Game], min_games: int = 3) -> dict[str, Any]:
     cards = _cards(a)
+    now = set(_ids(current_deck_key(items)))
     grouped: defaultdict[str, list[Game]] = defaultdict(list)
     for g in items:
         grouped[g["deck_key"]].append(g)
@@ -616,7 +629,7 @@ def best_deck(a: Analyzer, items: list[Game], min_games: int = 3) -> dict[str, A
     rows = [
         _record(gs)
         | {
-            "cards": [cards[c] for c in _ids(key) if c in cards],
+            "cards": compared(cards, _ids(key), now),
             "net_trophies": sum(g["trophy_change"] or 0 for g in gs),
             "current": key == current,
         }

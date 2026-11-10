@@ -30,6 +30,7 @@ class CrawlParams:
     depth: int = 2
     max_players: int = 3000
     refresh_hours: float = 12.0
+    tracked_refresh_hours: float = 2.0  # people who use Rook: their logs only hold ~25 battles
     location: str = "global"
     expand_friendly: bool = False
 
@@ -38,6 +39,7 @@ class CrawlParams:
 class CrawlStats:
     players_fetched: int = 0
     players_skipped_fresh: int = 0
+    tracked_refreshed: int = 0
     players_missing: int = 0
     players_failed: int = 0
     battles_new: int = 0
@@ -251,8 +253,25 @@ async def crawl(
     budget = params.max_players
     tasks: list[asyncio.Task[None]] = []
     status = "error"
+    tracked_cutoff = (datetime.now(UTC) - timedelta(hours=params.tracked_refresh_hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
     try:
+        # Rook's users first, outside the budget: they're few, and their history is the product.
+        tracked = [
+            t
+            for t in await writer.call(db.tracked_players, conn, tracked_cutoff)
+            if t not in seed_set
+        ]
+        if tracked:
+            if progress:
+                progress.depth_started(0, len(tracked), 0, budget)
+            _, tasks = await _crawl_depth(
+                client, conn, writer, stats, tracked, 0, params, seed_set, seed_rank, progress
+            )
+            stats.tracked_refreshed = len(tracked)
+            seen.update(tracked)
         for depth in range(params.depth + 1):
             if not frontier:
                 break

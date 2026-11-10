@@ -158,3 +158,15 @@ def test_prune_keeps_recent_and_seed_battles(db_path: Path) -> None:
 
 def count_rows(conn: sqlite3.Connection, table: str) -> int:
     return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+
+
+def test_prune_keeps_the_games_of_people_who_use_rook(db_path: Path) -> None:
+    with db.session(db_path) as conn:
+        user = battle(START_OLD, "#QQ", "#Q8", a_wins=True)
+        stranger = battle(START_OLD, "#QV", "#Q8", a_wins=True)
+        db.ingest_battlelog(conn, [user, stranger])
+        db.mark_battlelog_fetched(conn, "#QQ")
+        db.track_player(conn, "#QQ")
+        assert db.prune_battles(conn, 14) == 1
+        assert db.tracked_players(conn, "2000-01-01T00:00:00Z") == []
+        assert db.tracked_players(conn, "2999-01-01T00:00:00Z") == ["#QQ"]

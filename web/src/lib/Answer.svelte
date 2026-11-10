@@ -103,6 +103,10 @@
     </div>
   {/if}
 {:else if id === "best_deck"}
+  <p class="flex items-center gap-3 text-xs opacity-60 mb-3" data-testid="compare-legend">
+    <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-3 rounded-sm bg-base-content/25"></span>In your deck now</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-3 rounded-sm bg-primary"></span>Different</span>
+  </p>
   <ul class="space-y-4">
     {#each data.decks as d, i (i)}
       <li>
@@ -110,7 +114,7 @@
           <span>{d.wins}–{d.losses} · won {pct(d.win_rate)} {#if d.current}<span class="badge badge-accent badge-xs ml-1">playing now</span>{/if}</span>
           <span class="tabular-nums opacity-70 whitespace-nowrap">{d.net_trophies > 0 ? "+" : ""}{d.net_trophies} 🏆</span>
         </div>
-        <div class="grid grid-cols-8 gap-1 max-w-xl">{#each d.cards as c (c.id)}<CardTile card={c} />{/each}</div>
+        <div class="grid grid-cols-8 gap-1 max-w-xl">{#each d.cards as c (c.id)}<CardTile card={c} dim={!d.current && c.yours} />{/each}</div>
         <div class="text-xs opacity-70 mt-1">{sureness(d.games)}</div>
       </li>
     {/each}

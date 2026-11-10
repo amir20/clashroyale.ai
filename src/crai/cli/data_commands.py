@@ -50,6 +50,9 @@ def crawl_cmd(
     refresh_hours: Annotated[
         float, typer.Option(help="Skip players fetched more recently than this")
     ] = 12.0,
+    tracked_refresh_hours: Annotated[
+        float, typer.Option(help="Refresh people who use Rook if older than this")
+    ] = 2.0,
     location: Annotated[str, typer.Option(help="'global' or a location id")] = "global",
     concurrency: Annotated[int, typer.Option(help="Parallel requests per API key")] = 8,
 ) -> None:
@@ -63,6 +66,7 @@ def crawl_cmd(
         depth=depth,
         max_players=max_players,
         refresh_hours=refresh_hours,
+        tracked_refresh_hours=tracked_refresh_hours,
         location=location,
     )
     live = not _state["json"] and ui.console.is_terminal

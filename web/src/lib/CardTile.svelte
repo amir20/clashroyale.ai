@@ -1,11 +1,12 @@
 <script lang="ts">
   import type { Card } from "./api";
-  let { card, sub, meta, status }: { card: Card; sub?: string; meta?: string; status?: "evolution" | "hero" | "both" | null } =
+  // `dim` grays out a card the player already runs, so the different cards in a deck stand out.
+  let { card, sub, meta, status, dim = false }: { card: Card; sub?: string; meta?: string; status?: "evolution" | "hero" | "both" | null; dim?: boolean } =
     $props();
   let failedIcon = $state<string | null>(null); // the game's server is missing some card art
 </script>
 
-<figure>
+<figure class={dim ? "grayscale opacity-40" : ""} data-dim={dim || undefined}>
   {#if card.icon && failedIcon !== card.icon}
     <img src={card.icon} alt={card.name} loading="lazy" class="w-full" onerror={() => (failedIcon = card.icon)} />
   {:else}
