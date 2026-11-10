@@ -68,7 +68,7 @@ def test_load_rate_limit(db_path: Path) -> None:
         assert events(c.get(f"/api/players/{ME[1:]}/load").text)[-1]["code"] == "rate_limited"
 
 
-@pytest.mark.parametrize("q", ["replace_card", "best_cards", "nemesis", "best_deck"])
+@pytest.mark.parametrize("q", ["why_losing", "replace_card", "best_cards", "nemesis", "best_deck"])
 def test_prefilled_questions_answer_in_character(db_path: Path, q: str) -> None:
     with client(db_path) as c:
         body = c.get(f"/api/players/{ME[1:]}/questions/{q}").json()
@@ -179,7 +179,7 @@ def test_record_against_any_card(analyzer: Analyzer) -> None:
     }
 
 
-@pytest.mark.parametrize("q", ["replace_card", "best_cards", "nemesis", "best_deck"])
+@pytest.mark.parametrize("q", ["why_losing", "replace_card", "best_cards", "nemesis", "best_deck"])
 def test_answers_are_plain_language_and_show_their_evidence(db_path: Path, q: str) -> None:
     with client(db_path) as c:
         body = c.get(f"/api/players/{ME[1:]}/questions/{q}").json()

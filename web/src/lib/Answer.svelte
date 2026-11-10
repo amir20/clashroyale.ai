@@ -1,5 +1,6 @@
 <script lang="ts">
   import CardTile from "./CardTile.svelte";
+  import Visual from "./Visual.svelte";
   let { id, data }: { id: string; data: any } = $props();
   const pct = (x: number) => `${Math.round(x * 100)}%`;
   const per100 = (x: number) => `${x > 0 ? "+" : "−"}${Math.abs(x * 100).toFixed(1)} per 100`;
@@ -11,10 +12,49 @@
         : { label: "Hurts", tone: "badge-error" };
   const versus = (c: any) =>
     !c.real ? "Too few games to tell" : c.diff > 0 ? "Better than most" : "Worse than most";
+  // What each check in "Why do I keep losing?" looked at, in the player's words.
+  const checks: Record<string, string> = {
+    worst_matchups: "A card that beats you",
+    card_levels: "Card levels",
+    after_two_losses: "Playing on after two losses",
+    close_games: "One-crown games",
+    three_crowned: "Getting three-crowned",
+    deck_switching: "Switching decks",
+  };
+  const detail = (k: string, f: any): string => {
+    switch (k) {
+      case "worst_matchups":
+        return f.cards.length ? f.cards.map((c: any) => `${c.name} ${c.wins}–${c.games - c.wins}`).join(" · ") : "No card beats you more than chance";
+      case "card_levels":
+        return `Your deck ${f.your_deck_level} vs opponents ${f.typical_opponent_level}` + (f.in_those_games.games ? ` · ${pct(f.in_those_games.win_rate)} when outleveled` : "");
+      case "after_two_losses":
+        return `${pct(f.in_those_games.win_rate)} next game vs ${pct(f.other_games.win_rate)} otherwise · ${f.in_those_games.games} games`;
+      case "close_games":
+        return `Won ${f.wins} of ${f.games}`;
+      case "three_crowned":
+        return `${f.three_crowned_losses} of ${f.losses} losses`;
+      case "deck_switching":
+        return `${f.decks_used} decks in your last ${f.recent_games} games`;
+    }
+    return "";
+  };
   const sureness = (games: number) => (games < 30 ? `${games} games, too early to be sure` : `${games} games`);
 </script>
 
-{#if id === "replace_card" && data.enough}
+{#if id === "why_losing" && data.enough}
+  <ul class="space-y-2.5" data-testid="game-plan">
+    {#each Object.keys(checks) as k (k)}
+      {@const f = data.findings[k]}
+      <li class="flex items-start gap-3">
+        <span class="badge badge-sm badge-soft whitespace-nowrap mt-0.5 w-24 justify-center shrink-0 {f.real ? 'badge-error' : 'badge-success'}">{f.real ? "Costing you" : "Fine"}</span>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm">{checks[k]}</div>
+          <div class="text-xs opacity-70 tabular-nums">{detail(k, f)}</div>
+        </div>
+      </li>
+    {/each}
+  </ul>
+{:else if id === "replace_card" && data.enough}
   <p class="text-sm opacity-80 mb-3">
     How {data.family_decks.toLocaleString()} decks like yours do with and without each card, from
     {data.family_players.toLocaleString()} players this week.
@@ -75,4 +115,8 @@
       </li>
     {/each}
   </ul>
+  {#if data.proven}
+    <h4 class="text-sm font-semibold mt-5 mb-2">A proven deck with your {data.proven.kept.join(" and ")}</h4>
+    <Visual visual={data.proven} titled={false} />
+  {/if}
 {/if}

@@ -24,13 +24,14 @@ DAILY_QUESTIONS = 5
 HEARTBEAT_SECONDS = 1.6
 LOADS_PER_MINUTE = 20
 QUESTIONS = {
+    "why_losing": "Why do I keep losing?",
     "replace_card": "Which card should I replace?",
     "best_cards": "Which of my cards do I play better than other people?",
     "nemesis": "Which cards beat me the most?",
     "best_deck": "What's my best deck?",
 }
 
-type QuestionId = Literal["replace_card", "best_cards", "nemesis", "best_deck"]
+type QuestionId = Literal["why_losing", "replace_card", "best_cards", "nemesis", "best_deck"]
 
 
 class Usage:
@@ -160,7 +161,13 @@ class Service:
 
     def answer(self, tag: str, question: QuestionId) -> dict[str, Any]:
         a, items = self.analyzer, insights.games(self.analyzer, tag)
-        if question == "replace_card":
+        if question == "why_losing":
+            data, line, tool = (
+                insights.game_plan(a, tag, items),
+                voice.game_plan,
+                "how_to_win_more",
+            )
+        elif question == "replace_card":
             data, line, tool = (
                 insights.replace_card(a, tag, items),
                 voice.replace_card,
@@ -179,5 +186,9 @@ class Service:
                 "opponent_cards_that_beat_me",
             )
         else:
-            data, line, tool = insights.best_deck(a, items), voice.best_deck, "my_decks_compared"
-        return {"data": data, "line": line(data), "evidence": [voice.evidence(tool, data)]}
+            data = insights.best_deck(a, items) | {"proven": visuals.proven_for_player(a, items)}
+            line, tool = voice.best_deck, "my_decks_compared"
+        evidence = [voice.evidence(tool, data)]
+        if data.get("proven"):
+            evidence.append(voice.evidence("show_deck", data["proven"]))
+        return {"data": data, "line": line(data), "evidence": evidence}

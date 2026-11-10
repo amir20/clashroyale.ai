@@ -12,7 +12,13 @@ from typing import Any
 
 import polars as pl
 
-from crai.analysis.analytics import DEFAULT_SINCE_DAYS, EXCLUDED_TYPES, Analyzer, _margin
+from crai.analysis.analytics import (
+    DEFAULT_SINCE_DAYS,
+    EXCLUDED_TYPES,
+    Analyzer,
+    Filters,
+    _margin,
+)
 from crai.collect.client import normalize_tag
 
 type Game = dict[str, Any]
@@ -354,17 +360,44 @@ def elixir_standing(a: Analyzer, items: list[Game]) -> dict[str, Any]:
     }
 
 
-def near_player(decks: pl.DataFrame, items: list[Game]) -> pl.DataFrame | None:
-    """Decks from the player's kind of battle (ladder or ranked) at about their trophies."""
+def _trophy_range(items: list[Game]) -> tuple[str, int, int] | None:
+    """The player's kind of battle (ladder or ranked) and the trophy range around them."""
     latest = next((g for g in items if g["starting_trophies"]), None)
     if latest is None:
         return None
     level = latest["starting_trophies"]
     band = max(200, level * NEAR_TROPHIES_SHARE)
+    return latest["battle_type"], round(level - band), round(level + band)
+
+
+def near_player(decks: pl.DataFrame, items: list[Game]) -> pl.DataFrame | None:
+    """Decks from the player's kind of battle (ladder or ranked) at about their trophies."""
+    found = _trophy_range(items)
+    if found is None:
+        return None
+    kind, low, high = found
     return decks.filter(
-        pl.col("battle_type") == latest["battle_type"],
-        pl.col("starting_trophies").is_between(level - band, level + band),
+        pl.col("battle_type") == kind, pl.col("starting_trophies").is_between(low, high)
     )
+
+
+def near_filters(items: list[Game]) -> Filters | None:
+    """Filters for other players' games in the player's trophy range, for the global questions."""
+    found = _trophy_range(items)
+    if found is None:
+        return None
+    kind, low, high = found
+    return Filters(battle_types=(kind,), min_trophies=low, max_trophies=high)
+
+
+def trophy_scope(items: list[Game]) -> str:
+    """How to describe a near-trophy comparison to the player."""
+    found = _trophy_range(items)
+    if found is None:
+        return "all players"
+    kind, low, high = found
+    where = "on ladder" if kind == "trail" else "in ranked"
+    return f"players {where} at {low:,}-{high:,} trophies, like this player"
 
 
 @dataclass(frozen=True)
@@ -520,6 +553,7 @@ def nemesis(a: Analyzer, items: list[Game], min_games: int = 3) -> dict[str, Any
         | {
             "games": len(gs),
             "wins": sum(g["result"] == "win" for g in gs),
+            "losses": sum(g["result"] == "loss" for g in gs),
             "win_rate": round(_rate(gs), 3),
             "diff": round(_rate(gs) - overall, 3),
             "margin": _margin(len(gs)),
@@ -591,3 +625,164 @@ def best_deck(a: Analyzer, items: list[Game], min_games: int = 3) -> dict[str, A
     ]
     rows.sort(key=lambda r: (r["win_rate"], r["games"]), reverse=True)
     return {"decks": rows[:5]}
+
+
+# ---------------------------------------------------------------- how to win more
+
+UNDERLEVELED = 0.5  # opponent's deck averages at least half a level above the player's
+TILT_STREAK = 2  # losses in a row before we check how the next game goes
+RECENT_FOR_SWITCHING = 30
+MIN_PLAN_GAMES = 10  # per side of a comparison, before it can count as a finding
+MIN_GAMES_TO_JUDGE = 15
+PLAN_ORDER = (
+    "worst_matchups",
+    "card_levels",
+    "after_two_losses",
+    "close_games",
+    "three_crowned",
+    "deck_switching",
+)
+
+
+def _split(items: list[Game], test: list[bool]) -> dict[str, Any]:
+    """Records for the games that pass a test and the ones that don't, and whether they differ."""
+    yes = [g for g, t in zip(items, test, strict=True) if t]
+    no = [g for g, t in zip(items, test, strict=True) if not t]
+    diff = _rate(yes) - _rate(no) if yes and no else 0.0
+    margin = 1.96 * (0.25 / len(yes) + 0.25 / len(no)) ** 0.5 if yes and no else 1.0
+    enough = min(len(yes), len(no)) >= MIN_PLAN_GAMES
+    return {
+        "in_those_games": _record(yes),
+        "other_games": _record(no),
+        "diff": round(diff, 3),
+        "real": enough and abs(diff) > max(margin, MEANINGFUL_GAIN),
+    }
+
+
+def _deck_levels(a: Analyzer, tag: str, items: list[Game]) -> dict[int, tuple[float, float]]:
+    """battle_id -> (player's average card level, opponent's), on the in-game scale."""
+    ids = [g["battle_id"] for g in items]
+    if not ids:
+        return {}
+    rows = a.query(
+        f"""SELECT battle_id, player_tag = ? AS me, avg(level + (? - max_level)) AS lvl
+            FROM participant_cards
+            WHERE kind = 'deck' AND battle_id IN ({",".join("?" * len(ids))})
+            GROUP BY 1, 2""",
+        (tag, a._max_common_level, *ids),
+    ).to_dicts()
+    pairs: defaultdict[int, dict[int, float]] = defaultdict(dict)
+    for r in rows:
+        pairs[r["battle_id"]][r["me"]] = r["lvl"]
+    return {b: (p[1], p[0]) for b, p in pairs.items() if 0 in p and 1 in p}
+
+
+def levels(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
+    """Are they losing to card levels? Games against higher-level decks vs the rest."""
+    tag = normalize_tag(tag)
+    known = _deck_levels(a, tag, items)
+    games_known = [g for g in items if g["battle_id"] in known]
+    if not games_known:
+        return {"games": 0}
+    gaps = [known[g["battle_id"]][1] - known[g["battle_id"]][0] for g in games_known]
+    o = overview(a, tag, items)
+    typical_opponent = median(known[g["battle_id"]][1] for g in games_known)
+    behind = [
+        {"name": c["name"], "level": c["level"]}
+        for c in o["deck"]
+        if c["level"] is not None and c["level"] < round(typical_opponent)
+    ]
+    return _split(games_known, [gap >= UNDERLEVELED for gap in gaps]) | {
+        "what": "Games where the opponent's deck was at least half a level higher than theirs",
+        "your_deck_level": round(median(known[g["battle_id"]][0] for g in games_known), 2),
+        "typical_opponent_level": round(typical_opponent, 2),
+        "share_underleveled": round(sum(gap >= UNDERLEVELED for gap in gaps) / len(gaps), 2),
+        "cards_below_typical_opponent": behind,
+    }
+
+
+def tilt(items: list[Game]) -> dict[str, Any]:
+    """How the next game goes after losing two in a row (items are newest first)."""
+    after = [
+        all(items[j]["result"] == "loss" for j in range(i + 1, i + 1 + TILT_STREAK))
+        for i in range(len(items) - TILT_STREAK)
+    ]
+    return _split(items[: len(after)], after) | {
+        "what": f"Games played right after losing {TILT_STREAK} in a row",
+    }
+
+
+def deck_switching(items: list[Game]) -> dict[str, Any]:
+    recent = items[:RECENT_FOR_SWITCHING]
+    current = current_deck_key(items)
+    run = next((i for i, g in enumerate(items) if g["deck_key"] != current), len(items))
+    return {
+        "recent_games": len(recent),
+        "decks_used": len({g["deck_key"] for g in recent}),
+        "games_in_a_row_on_current_deck": run,
+    }
+
+
+def game_plan(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
+    """Every common reason players lose, checked against this player's own games.
+
+    Each finding says whether the games show it for real. The model leads with the real ones and
+    turns each into one thing to do next.
+    """
+    if len(items) < MIN_TREND_GAMES:
+        return {"enough": False, "games": len(items)}
+    w = wins_and_losses(items)
+    worst = [r for r in nemesis(a, items)["worst"] if r["real"]]
+    close = w["close_games"]
+    losses = max(w["losses"], 1)
+    switching = deck_switching(items)
+    findings = {
+        "card_levels": levels(a, tag, items),
+        "after_two_losses": tilt(items),
+        "deck_switching": switching
+        | {"real": switching["decks_used"] >= 3 and switching["recent_games"] >= 20},
+        "worst_matchups": {
+            "cards": worst[:3],
+            "your_usual_win_rate": round(_rate(items), 3),
+            "real": bool(worst),
+        },
+        "close_games": close
+        | {"real": close["games"] >= MIN_GAMES_TO_JUDGE and close["win_rate"] <= 0.45},
+        "three_crowned": {
+            "losses": w["losses"],
+            "three_crowned_losses": w["three_crowned_losses"],
+            "share_of_losses": round(w["three_crowned_losses"] / losses, 2),
+            "real": w["losses"] >= MIN_PLAN_GAMES and w["three_crowned_losses"] / losses >= 0.4,
+        },
+    }
+    deck = [c["name"] for c in overview(a, tag, items)["deck"]]
+    return {
+        "enough": True,
+        "games": len(items),
+        "record": _record(items),
+        "current_deck": deck,
+        "games_on_current_deck": sum(g["deck_key"] == current_deck_key(items) for g in items),
+        # Most specific and fixable first: a card that beats them, then levels, then habits.
+        "real_problems": [k for k in PLAN_ORDER if findings[k].get("real")],
+        "findings": findings,
+        "scope": "This player's own games. Each finding's `real` says if the games prove it.",
+    }
+
+
+def field_size(a: Analyzer, items: list[Game]) -> dict[str, Any]:
+    """How many games Rook can learn from, overall and in this player's trophy range."""
+    every = a.decks()
+    out: dict[str, Any] = {
+        "days": DEFAULT_SINCE_DAYS,
+        "battles_all_players": every["battle_id"].n_unique(),
+        "players_all": every["player_tag"].n_unique(),
+        "your_games": len(items),
+    }
+    near = near_player(every, items)
+    if near is not None:
+        out |= {
+            "battles_near_your_trophies": near["battle_id"].n_unique(),
+            "players_near_your_trophies": near["player_tag"].n_unique(),
+            "near_means": trophy_scope(items),
+        }
+    return out

@@ -143,14 +143,16 @@ class Filters:
     since_days: only battles from the last N days (default 7: the meta shifts with balance
       changes, and ~93% of crawled battles are this recent anyway). 0 = all time.
     deck_selection: 'collection' (normal decks) by default; None to include draft/special modes.
-    min_trophies: subject deck's starting trophies >= N. Ladder (`trail`) uses trophies; Path of
-      Legend reports its own rating (~2000s) in the same field, so filter battle_types too.
+    min_trophies / max_trophies: subject deck's starting trophies within this range. Ladder
+      (`trail`) uses trophies; Path of Legend reports its own rating (~2000s) in the same field,
+      so filter battle_types too.
     """
 
     battle_types: tuple[str, ...] | None = None
     since_days: int = DEFAULT_SINCE_DAYS
     deck_selection: str | None = "collection"
     min_trophies: int | None = None
+    max_trophies: int | None = None
 
     @classmethod
     def of(
@@ -388,6 +390,8 @@ class Analyzer:
             d = d.filter(pl.col("is_top") == 1)
         if f.min_trophies is not None:
             d = d.filter(pl.col("starting_trophies") >= f.min_trophies)
+        if f.max_trophies is not None:
+            d = d.filter(pl.col("starting_trophies") <= f.max_trophies)
         return d
 
     @staticmethod

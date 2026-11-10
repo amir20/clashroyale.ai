@@ -230,3 +230,51 @@ def test_only_deck_cards_can_be_picked(analyzer: Analyzer) -> None:
     names = [c["name"] for c in insights.playable_cards(analyzer)]
     assert names == sorted(names)
     assert "Hog Rider" in names
+
+
+def test_tilt_compares_the_game_after_two_losses() -> None:
+    # Newest first: the win at index 0 came right after two losses.
+    items = [game("win"), game("loss"), game("loss"), game("win"), game("win")]
+    t = insights.tilt(items)
+    assert t["in_those_games"]["games"] == 1
+    assert t["in_those_games"]["wins"] == 1
+    assert not t["real"]  # one game proves nothing
+
+
+def test_deck_switching_counts_recent_decks() -> None:
+    items = [game("win", deck_key="1"), game("win", deck_key="1"), game("loss", deck_key="2")]
+    s = insights.deck_switching(items)
+    assert s["decks_used"] == 2
+    assert s["games_in_a_row_on_current_deck"] == 2
+
+
+def test_game_plan_only_calls_proven_problems_real(analyzer: Analyzer) -> None:
+    plan = insights.game_plan(analyzer, ME, insights.games(analyzer, ME))
+    assert plan["enough"]
+    for kind in plan["real_problems"]:
+        assert plan["findings"][kind]["real"]
+    assert set(plan["real_problems"]) <= set(insights.PLAN_ORDER)
+    assert plan["current_deck"]
+    assert voice.game_plan(plan)
+
+
+def test_matchup_losses_are_counted_not_left_to_the_model(analyzer: Analyzer) -> None:
+    for r in insights.nemesis(analyzer, insights.games(analyzer, ME))["worst"]:
+        assert r["wins"] + r["losses"] <= r["games"]
+
+
+def test_global_questions_use_the_players_trophy_range(analyzer: Analyzer) -> None:
+    items = insights.games(analyzer, ME)
+    f = insights.near_filters(items)
+    assert f is not None and f.min_trophies is not None and f.max_trophies is not None
+    assert f.min_trophies < items[0]["starting_trophies"] < f.max_trophies
+
+
+def test_a_recommended_deck_must_win_more_than_it_loses(analyzer: Analyzer) -> None:
+    for d in visuals.proven_decks(analyzer, [], limit=20):
+        assert d["win_rate"] - d["margin"] > 0.5
+
+
+def test_matchup_tips_fit_the_kind_of_card() -> None:
+    assert "Spread" in voice._tip_against({"id": 28000000, "name": "Fireball"})
+    assert "lane" in voice._tip_against({"id": 27000000, "name": "Cannon"})

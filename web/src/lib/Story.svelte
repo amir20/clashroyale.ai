@@ -36,7 +36,8 @@
     "goals",
   ]);
   const goals = [
-    { title: "Win more", detail: "Which of my decks wins most", id: "best_deck", label: "What's my best deck?" },
+    { title: "Win more", detail: "What's actually costing me games", id: "why_losing", label: "Why do I keep losing?" },
+    { title: "Find a better deck", detail: "My best deck, and one proven at my trophies", id: "best_deck", label: "What's my best deck?" },
     { title: "Fix my deck", detail: "Which card to change", id: "replace_card", label: "Which card should I replace?" },
     { title: "Beat what's beating me", detail: "The cards giving me trouble", id: "nemesis", label: "Which cards beat me the most?" },
   ];

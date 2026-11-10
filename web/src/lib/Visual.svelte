@@ -8,6 +8,8 @@
   const gain = (x: number) => `${x > 0 ? "+" : ""}${(x * 100).toFixed(1)}`;
   const gainTone = (x: number) => (x > 0 ? "text-success" : x < 0 ? "text-error" : "text-base-content/60");
   const dayLabel = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  // Global numbers come from players at the viewer's trophies when there were enough of them.
+  const nearYou = (scope: string | undefined) => !!scope?.startsWith("Other players");
   const names = (cards: any[]) => cards.map((c) => c.name).join(" and ");
   const trends: Record<string, { label: string; tone: string }> = {
     improving: { label: "Trending up", tone: "text-success" },
@@ -87,7 +89,7 @@
         {/each}
       </ul>
       <p class="text-xs text-base-content/60 mt-3">
-        {#if v.kind === "top"}Across all players, compared with a 50% coin flip{:else if v.kind === "counters"}How often {v.card.name} decks win against each card. They usually win {pct1(v.baseline)}.{:else}{v.card.name} decks usually win {pct1(v.baseline)}. Plus or minus is the change with each partner.{/if}
+        {#if v.kind === "top"}{nearYou(v.scope) ? "Players at your trophies" : "Across all players"}, compared with a 50% coin flip{:else if v.kind === "counters"}How often {v.card.name} decks win against each card{nearYou(v.scope) ? " at your trophies" : ""}. They usually win {pct1(v.baseline)}.{:else}{v.card.name} decks usually win {pct1(v.baseline)}{nearYou(v.scope) ? " at your trophies" : ""}. Plus or minus is the change with each partner.{/if}
       </p>
     {:else}
       <p class="text-sm text-base-content/70">Not enough games yet.</p>
@@ -99,6 +101,7 @@
     <p class="text-center text-sm mt-3">
       <span class="stat-num">{pct(v.win_rate)}</span> wins · {v.games.toLocaleString()} games · {v.players.toLocaleString()} players · {v.avg_elixir} elixir
     </p>
+    <p class="text-xs text-center text-base-content/60 mt-0.5">{nearYou(v.scope) ? "Proven by players at your trophies this week" : "Proven across all players this week"}</p>
     <a class="btn btn-primary btn-sm w-full max-w-xs mx-auto flex mt-3 cursor-pointer" href={v.copy_url} target="_blank" rel="noreferrer">Copy to game</a>
   {:else if v.type === "worst_matchups"}
     {#if titled}<h4 class="text-sm font-semibold mb-3">What beats you most</h4>{/if}

@@ -89,9 +89,9 @@ def replace_card(r: dict[str, Any]) -> str:
         msg = f"{weak['name']} is costing you: {stats}, across {n} decks like yours."
     else:
         msg = (
-            f"I checked {n} decks like yours and nothing in yours is actually bad. "
-            f"{weak['name']} is your lowest: {stats}. That gap's too small to matter. "
-            "Stop blaming your cards."
+            f"I checked {n} decks like yours and no card in yours is actually hurting you. "
+            f"{weak['name']} is your lowest: {stats}, and that gap's too small to matter. "
+            "Your losses are coming from somewhere else, so ask me why you keep losing."
         )
     if r["candidates"]:
         c = r["candidates"][0]
@@ -197,13 +197,28 @@ def best_deck(r: dict[str, Any]) -> str:
     d = decks[0]
     head = f"Your best so far went {d['wins']}-{d['losses']} ({_pct(d['win_rate'])})."
     if len(decks) == 1:
-        return head + " It's also your only deck with enough games. Commitment. Or fear."
+        return (
+            head + " It's also your only deck with enough games. Commitment. Or fear."
+        ) + _proven_line(r)
     gap = d["win_rate"] - decks[1]["win_rate"]
     if min(d["games"], decks[1]["games"]) >= MIN_GAMES_TO_JUDGE and gap > max(
         d["margin"], decks[1]["margin"]
     ):
-        return head + " It's clearly ahead. Stick with it."
-    return head + " The next one is close enough that it could just be luck."
+        return head + " It's clearly ahead. Stick with it." + _proven_line(r)
+    return head + " The next one is close enough that it could just be luck." + _proven_line(r)
+
+
+def _proven_line(r: dict[str, Any]) -> str:
+    """Point at a deck other players have proven, keeping the cards this player likes."""
+    p = r.get("proven")
+    if not p:
+        return ""
+    who = "players at your trophies" if p["scope"].startswith("Other players") else "everyone"
+    kept = " and ".join(p["kept"])
+    return (
+        f" Want a sure thing? This deck keeps your {kept} and wins {_pct(p['win_rate'])} for "
+        f"{who}, over {p['games']:,} games from {p['players']:,} players."
+    )
 
 
 # The model occasionally breaks these rules however the prompt is worded, so enforce them here.
@@ -239,6 +254,16 @@ def tidy(text: str, only_similar_decks: bool = False) -> str:
     for pattern, plain in _WORDS:
         out = pattern.sub(plain, out)
     return _ALL_PLAYERS.sub("in decks like yours", out) if only_similar_decks else out
+
+
+def _where(r: Any, what: str) -> str:
+    """Evidence for a ranking: whose games it came from, read off the result's scope."""
+    near = isinstance(r, dict) and str(r.get("scope", "")).startswith("Other players")
+    return (
+        f"{what} among players at your trophies, last 7 days"
+        if near
+        else (f"{what} across all players, last 7 days")
+    )
 
 
 def _decks_like_yours(r: dict[str, Any]) -> str:
@@ -278,7 +303,7 @@ def evidence(tool: str, r: Any) -> str | None:
         case "my_record_with_card":
             return f"You haven't played {r['card']} in your recorded games"
         case "show_top_cards":
-            return "Every card across all players, last 7 days"
+            return _where(r, "Every card")
         case "show_worst_matchups":
             return "Your record against cards you've faced at least 5 times"
         case "show_trend" if r["same_deck"]:
@@ -295,15 +320,21 @@ def evidence(tool: str, r: Any) -> str | None:
         case "show_matchup":
             return f"You haven't faced {r['card']['name']} in your recorded games"
         case "show_card_ranking":
-            return "Results across all players, last 7 days"
+            return _where(r, "Results")
         case "show_deck":
-            return f"{r['games']:,} games of this deck from {r['players']:,} players, last 7 days"
+            return _where(r, f"{r['games']:,} games of this deck from {r['players']:,} players")
         case "best_partners_for_card":
-            return "Card pairings across all players, last 7 days"
+            return _where(r, "Card pairings")
         case "counters_for_card":
-            return "Matchups across all players, last 7 days"
+            return _where(r, "Matchups")
         case "top_decks_with_cards":
-            return "Top decks across all players, last 7 days"
+            return _where(r, "Top decks")
+        case "how_to_win_more" if r.get("enough"):
+            return f"Your last {r['games']} games, checked for what's costing you wins"
+        case "how_to_win_more":
+            return "Too few of your games to find a pattern"
+        case "how_many_games_rook_tracks":
+            return "Every battle I've tracked, last 7 days"
     return None
 
 
@@ -316,3 +347,70 @@ LOADING_LINES = (
     "Still here. Your decks are a lot to process.",
     "Comparing you to people who are better at this…",
 )
+
+
+def _tip_against(card: dict[str, Any]) -> str:
+    """Rook's opinion on playing into a card, by what kind of card it is (from its id)."""
+    kind = str(card["id"])[:2]
+    if kind == "28":
+        return (
+            f"Stop stacking your support troops where {card['name']} can hit them all. "
+            "Spread them out, and push once they've used it."
+        )
+    if kind == "27":
+        return f"Pull your push to the other lane, or chip it down before {card['name']} lands."
+    return f"Save your answer to {card['name']} for when it shows up, not before."
+
+
+def _problem_line(kind: str, f: dict[str, Any]) -> str:
+    """One finding from game_plan, as a diagnosis plus the thing to do about it."""
+    match kind:
+        case "worst_matchups":
+            c = f["cards"][0]
+            return (
+                f"{c['name']} is your real problem: you've won {c['wins']} of {c['games']} "
+                f"against it. {_tip_against(c)}"
+            )
+        case "card_levels":
+            yes = f["in_those_games"]
+            return (
+                f"Card levels are hurting: against higher-level decks you win "
+                f"{_pct(yes['win_rate'])} of {yes['games']} games. "
+                "Put your gold into this deck only."
+            )
+        case "after_two_losses":
+            yes, no = f["in_those_games"], f["other_games"]
+            return (
+                f"You tilt: right after two losses you win {_pct(yes['win_rate'])}, "
+                f"otherwise {_pct(no['win_rate'])}. Lose two, put the phone down."
+            )
+        case "deck_switching":
+            return (
+                f"You used {f['decks_used']} decks in your last {f['recent_games']} games. "
+                "Pick one and play it for a week. Hopping resets everything you've learned."
+            )
+        case "close_games":
+            return (
+                f"You've won only {f['wins']} of {f['games']} one-crown games. Stop spending "
+                "elixir on the last 30 seconds of chip and defend your lead."
+            )
+        case "three_crowned":
+            return (
+                f"{f['three_crowned_losses']} of your {f['losses']} losses were three-crown "
+                "blowouts. When a push breaks through, defend instead of racing."
+            )
+    return ""
+
+
+def game_plan(r: dict[str, Any]) -> str:
+    if not r.get("enough"):
+        return f"Only {r['games']} games so far. Play at least 20 and I'll tell you what's wrong."
+    real = r["real_problems"]
+    if not real:
+        rec = r["record"]
+        return (
+            f"You're {rec['wins']}-{rec['losses']}, and nothing in your games stands out as "
+            "costing you wins: not levels, not tilt, not one card. Stick with this deck and grind."
+        )
+    lines = [_problem_line(k, r["findings"][k]) for k in real[:2]]
+    return " ".join(line for line in lines if line)

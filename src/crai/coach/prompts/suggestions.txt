@@ -5,6 +5,11 @@ Write exactly 3 questions, one per line, in the player's own voice, like "How do
 Hog Rider?". Each one must be under 10 words, end with a question mark, and follow naturally from
 the conversation. Name specific cards from the conversation or the player's deck when you can.
 
+Players most want to know: why they keep losing or are stuck, what to swap, how to beat the card
+that beats them, whether there's a better proven deck at their trophies, and how they do against
+specific cards. Lean toward those, and toward the next step after the last answer: after a
+matchup, how to beat it; after a swap, a proven deck with it; after a problem, how to fix it.
+
 Only suggest questions that can be answered from what the coach can look up:
 {capabilities}
 

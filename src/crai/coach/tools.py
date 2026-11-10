@@ -11,7 +11,8 @@ from typing import Any, Protocol
 import httpx
 
 from crai.analysis import insights, visuals
-from crai.analysis.analytics import Analyzer, records
+from crai.analysis.analytics import DEFAULT_FILTERS, Analyzer, records
+from crai.analysis.insights import near_filters
 from crai.coach import prompts
 from crai.config import Settings
 
@@ -52,6 +53,21 @@ def player_tools(svc: CoachContext, tag: str) -> dict[str, Callable[[dict[str, A
             "last_20_games": {"wins": recent["win"], "losses": recent["loss"]},
         }
 
+    def near_ranking(card: str, kind: str) -> dict[str, Any]:
+        """Up to 10 partners or counters, at the player's trophies when there are enough."""
+        view = visuals.ranking_view(a, card, kind, items())
+        f = near_filters(items()) if view["scope"] != visuals.ALL_PLAYERS else None
+        df = (
+            a.card_pairs(card, f or DEFAULT_FILTERS, min_games=50, sort_by="adj_win_rate")[1]
+            if kind == "pairs"
+            else a.card_matchups(card, f or DEFAULT_FILTERS, min_games=50)[1]
+        )
+        return {"scope": view["scope"], "baseline": view["baseline"], "rows": records(df, 10)}
+
+    def top_decks(cards: list[str]) -> dict[str, Any]:
+        decks, scope = visuals.near_proven_decks(a, cards, items(), limit=5)
+        return {"scope": scope, "decks": decks}
+
     return {
         "get_overview": lambda _: overview(),
         "get_patterns": lambda _: insights.wins_and_losses(items()),
@@ -63,9 +79,13 @@ def player_tools(svc: CoachContext, tag: str) -> dict[str, Callable[[dict[str, A
             a, tag, items(), args["out_card"], args["in_card"]
         ),
         "show_matchup": lambda args: visuals.matchup_view(a, items(), args["card"]),
-        "show_card_ranking": lambda args: visuals.ranking_view(a, args["card"], args["kind"]),
-        "show_deck": lambda args: visuals.deck_view(a, args["cards"]),
-        "show_top_cards": lambda _: visuals.top_cards_view(a),
+        "show_card_ranking": lambda args: visuals.ranking_view(
+            a, args["card"], args["kind"], items()
+        ),
+        "show_deck": lambda args: visuals.deck_view(a, args["cards"], items()),
+        "show_top_cards": lambda _: visuals.top_cards_view(a, items()),
+        "how_to_win_more": lambda _: insights.game_plan(a, tag, items()),
+        "how_many_games_rook_tracks": lambda _: insights.field_size(a, items()),
         "show_worst_matchups": lambda _: visuals.worst_matchups_view(a, items()),
         "show_trend": lambda _: visuals.trend_view(a, items()),
         "show_close_games": lambda _: visuals.close_games_view(items()),
@@ -73,15 +93,9 @@ def player_tools(svc: CoachContext, tag: str) -> dict[str, Callable[[dict[str, A
         "my_record_with_card": lambda args: insights.record_with(a, items(), args["card"]),
         "not_about_the_game": lambda _: {"note": "Nothing to look up. Don't quote any numbers."},
         "my_record_against_card": lambda args: insights.record_against(a, items(), args["card"]),
-        "best_partners_for_card": lambda args: records(
-            a.card_pairs(args["card"], min_games=50, sort_by="adj_win_rate")[1], 10
-        ),
-        "counters_for_card": lambda args: records(
-            a.card_matchups(args["card"], min_games=50)[1], 10
-        ),
-        "top_decks_with_cards": lambda args: visuals.proven_decks(
-            a, args.get("cards", []), limit=5
-        ),
+        "best_partners_for_card": lambda args: near_ranking(args["card"], "pairs"),
+        "counters_for_card": lambda args: near_ranking(args["card"], "counters"),
+        "top_decks_with_cards": lambda args: top_decks(args.get("cards", [])),
     }
 
 

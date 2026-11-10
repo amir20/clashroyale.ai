@@ -10,7 +10,7 @@ from typing import Any
 
 import polars as pl
 
-from crai.analysis.analytics import Analyzer, CardRef, DeckResult
+from crai.analysis.analytics import DEFAULT_FILTERS, Analyzer, CardRef, DeckResult, Filters
 from crai.analysis.insights import (
     CLOSE_SHARED_CARDS,
     MEANINGFUL_GAIN,
@@ -20,10 +20,12 @@ from crai.analysis.insights import (
     _record,
     current_deck_key,
     elixir_standing,
+    near_filters,
     near_player,
     nemesis,
     record_against,
     trend,
+    trophy_scope,
     wins_and_losses,
 )
 from crai.collect.client import normalize_tag
@@ -37,6 +39,18 @@ COPY_DECK_URL = (
     "https://link.clashroyale.com/en?clashroyale://copyDeck?deck={deck}&l=Royals&tt=159000000"
 )
 ALL_PLAYERS = "All players' decks, not this player's and not only decks like theirs."
+MIN_NEAR_DECKS = 2000  # decks with the card in the player's trophy range, before we trust it
+
+
+def _where(items: list[Game] | None) -> tuple[Filters, str]:
+    """Other players at this player's trophies when we know them, else everyone."""
+    f = near_filters(items) if items else None
+    if f is None:
+        return DEFAULT_FILTERS, ALL_PLAYERS
+    return f, (
+        f"Other {trophy_scope(items or [])}, not this player's own games. "
+        "Say 'players at your trophies'."
+    )
 
 
 def _swap_pools(
@@ -119,15 +133,26 @@ def swap_view(
 
 def matchup_view(a: Analyzer, items: list[Game], card: str) -> dict[str, Any]:
     record = record_against(a, items, card)
-    return record | {"type": "matchup", "card": _cards(a)[a.resolve_card(card)]}
-
-
-def ranking_view(a: Analyzer, card: str, kind: str) -> dict[str, Any]:
-    """Top partners for a card, or the opponent cards that beat decks with it."""
     cards = _cards(a)
-    scope = ALL_PLAYERS
+    mine = [cards[c]["name"] for c in _ids(current_deck_key(items)) if c in cards]
+    return record | {"type": "matchup", "card": cards[a.resolve_card(card)], "your_deck": mine}
+
+
+def ranking_view(
+    a: Analyzer, card: str, kind: str, items: list[Game] | None = None
+) -> dict[str, Any]:
+    """Top partners for a card, or the opponent cards that beat decks with it.
+
+    Ranked among players at this player's trophies when there are enough of them.
+    """
+    f, scope = _where(items)
+    if f is not DEFAULT_FILTERS:
+        size = a.card_pairs(card, f, min_games=MIN_VISUAL_GAMES)[0]["decks_with_card"]
+        if size < MIN_NEAR_DECKS:
+            f, scope = DEFAULT_FILTERS, ALL_PLAYERS
+    cards = _cards(a)
     if kind == "counters":
-        summary, df = a.card_matchups(card, min_games=MIN_VISUAL_GAMES)
+        summary, df = a.card_matchups(card, f, min_games=MIN_VISUAL_GAMES)
         baseline = summary["overall_win_rate"]
         name = cards[a.resolve_card(card)]["name"]
         scope += (
@@ -136,7 +161,7 @@ def ranking_view(a: Analyzer, card: str, kind: str) -> dict[str, Any]:
         )
     else:
         kind = "pairs"
-        summary, df = a.card_pairs(card, min_games=MIN_VISUAL_GAMES, sort_by="adj_win_rate")
+        summary, df = a.card_pairs(card, f, min_games=MIN_VISUAL_GAMES, sort_by="adj_win_rate")
         baseline = summary["win_rate"]
     return {
         "type": "ranking",
@@ -163,10 +188,11 @@ def _ranked(
     ]
 
 
-def top_cards_view(a: Analyzer) -> dict[str, Any]:
-    """The cards winning the most right now, among those people actually play."""
+def top_cards_view(a: Analyzer, items: list[Game] | None = None) -> dict[str, Any]:
+    """The cards winning the most right now at this player's trophies, among those played."""
+    f, scope = _where(items)
     df = (
-        a.card_stats(min_games=MIN_VISUAL_GAMES, sort_by="adj_win_rate")
+        a.card_stats(f, min_games=MIN_VISUAL_GAMES, sort_by="adj_win_rate")
         .filter(pl.col("use_rate") >= MIN_TOP_CARD_USE)
         .head(5)
     )
@@ -175,13 +201,16 @@ def top_cards_view(a: Analyzer) -> dict[str, Any]:
         "kind": "top",
         "baseline": 0.5,
         "rows": _ranked(df.to_dicts(), _cards(a), 0.5),
-        "scope": ALL_PLAYERS,
+        "scope": scope,
     }
 
 
-def proven_decks(a: Analyzer, wanted: Sequence[CardRef], limit: int = 1) -> list[DeckResult]:
+def proven_decks(
+    a: Analyzer, wanted: Sequence[CardRef], limit: int = 1, f: Filters = DEFAULT_FILTERS
+) -> list[DeckResult]:
     """Decks winning across many players, ranked by what their sample size can vouch for."""
-    return a.top_decks(
+    decks = a.top_decks(
+        f,
         include=wanted,
         min_games=MIN_VISUAL_GAMES,
         min_players=MIN_DECK_PLAYERS,
@@ -189,14 +218,52 @@ def proven_decks(a: Analyzer, wanted: Sequence[CardRef], limit: int = 1) -> list
         sort_by="lower_bound",
         limit=limit,
     )
+    # A deck we can't vouch for winning more than it loses is no recommendation.
+    return [d for d in decks if d["win_rate"] - d["margin"] > 0.5]
 
 
-def deck_view(a: Analyzer, wanted: list[str]) -> dict[str, Any]:
+def near_proven_decks(
+    a: Analyzer, wanted: Sequence[CardRef], items: list[Game] | None, limit: int = 1
+) -> tuple[list[DeckResult], str]:
+    """Proven decks at this player's trophies, or across everyone if none are proven there."""
+    f, scope = _where(items)
+    decks = proven_decks(a, wanted, limit, f) if f is not DEFAULT_FILTERS else []
+    if decks:
+        return decks, scope
+    return proven_decks(a, wanted, limit), ALL_PLAYERS
+
+
+def proven_for_player(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
+    """A proven deck from players at their trophies that keeps the cards they play most.
+
+    Tries the three cards they've run in the most games, then two, then their single favorite.
+    """
+    counts: dict[int, int] = {}
+    for g in items:
+        for cid in _ids(g["deck_key"]):
+            counts[cid] = counts.get(cid, 0) + 1
+    favorites = sorted(counts, key=lambda c: counts[c], reverse=True)[:3]
+    names = _cards(a)
+    f, scope = _where(items)
+    for where, label in ((f, scope), (DEFAULT_FILTERS, ALL_PLAYERS)):
+        for n in (3, 2, 1):
+            kept = favorites[:n]
+            if decks := proven_decks(a, [str(c) for c in kept], 1, where):
+                return _deck_card(a, decks[0], label) | {
+                    "kept": [names[c]["name"] for c in kept if c in names]
+                }
+    return None
+
+
+def deck_view(a: Analyzer, wanted: list[str], items: list[Game] | None = None) -> dict[str, Any]:
     """The best proven deck containing the requested cards."""
-    decks = proven_decks(a, wanted)
+    decks, scope = near_proven_decks(a, wanted, items)
     if not decks:
         return {"error": "No deck with those cards has been won with by enough different players."}
-    d = decks[0]
+    return _deck_card(a, decks[0], scope)
+
+
+def _deck_card(a: Analyzer, d: DeckResult, scope: str) -> dict[str, Any]:
     by_name = {c["name"]: c for c in _cards(a).values()}
     shown = [by_name[n] for n in d["cards"]]
     ids = ";".join(str(c["id"]) for c in shown)
@@ -208,7 +275,7 @@ def deck_view(a: Analyzer, wanted: list[str]) -> dict[str, Any]:
         "win_rate": d["win_rate"],
         "avg_elixir": d["avg_elixir"],
         "copy_url": COPY_DECK_URL.format(deck=ids),
-        "scope": ALL_PLAYERS,
+        "scope": scope,
     }
 
 
