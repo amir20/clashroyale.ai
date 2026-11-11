@@ -34,6 +34,8 @@ async def with_heartbeat[T](
         if done:
             return task.result()
         i += 1
+        if not lines:
+            continue
         await emit(
             {
                 "type": "status",
@@ -143,10 +145,24 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
             )
             with laps.lap("wait"):
                 await svc.lock.acquire()
+            loop = asyncio.get_running_loop()
+
+            def on_step(name: str) -> None:  # runs in the report's thread
+                if name in voice.REPORT_STEPS:
+                    progress, message = voice.REPORT_STEPS[name]
+                    event = {
+                        "type": "status",
+                        "step": name,
+                        "progress": progress,
+                        "message": message,
+                    }
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+
             try:
                 with laps.lap("analyze"):
+                    # Each section says what it's doing, so no filler lines in between.
                     report = await with_heartbeat(
-                        asyncio.to_thread(svc.report, tag), emit, "analyze", 4
+                        asyncio.to_thread(svc.report, tag, on_step), emit, "analyze", 4, ()
                     )
             finally:
                 svc.lock.release()

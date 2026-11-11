@@ -408,3 +408,17 @@ async def test_waking_server_says_so_instead_of_looking_stuck(
     steps = [e.get("step") for e in out]
     assert steps.index("wake") < steps.index("store")  # waits before the snapshot is touched
     assert out[-1]["type"] == "ready"
+
+
+def test_loading_says_what_it_is_working_on(db_path: Path) -> None:
+    with client(db_path) as c:
+        out = events(c.get(f"/api/players/{ME[1:]}/load").text)
+    status = [e for e in out if e["type"] == "status"]
+    steps = [e["step"] for e in status]
+    for step in ("similar", "worst", "surprises"):
+        assert step in steps
+    assert steps.index("similar") < steps.index("surprises") < steps.index("done")
+    progress = [e["progress"] for e in status if "progress" in e]
+    assert progress == sorted(progress)  # the bar only moves forward
+    shown = {e["message"] for e in status}
+    assert voice.REPORT_STEPS["similar"][1] in shown

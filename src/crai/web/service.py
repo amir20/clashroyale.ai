@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -128,8 +129,9 @@ class Service:
         log.info("stored %s: %d new battles in %.2fs (%s)", tag, new, laps.total, laps)
         return new
 
-    def report(self, tag: str) -> dict[str, Any]:
-        a, laps = self.analyzer, Laps()
+    def report(self, tag: str, on_step: Callable[[str], None] | None = None) -> dict[str, Any]:
+        """The whole report. `on_step` hears each section's name as it starts."""
+        a, laps = self.analyzer, Laps(on_step)
         with laps.lap("data"):
             a.decks()  # loads or refreshes the shared table, so its cost shows on its own
         with laps.lap("games"):

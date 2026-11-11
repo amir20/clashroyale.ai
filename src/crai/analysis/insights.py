@@ -5,6 +5,7 @@ answers need no AI call and can't be hallucinated. `coach.py` turns these result
 """
 
 from collections import Counter, defaultdict
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from math import ceil
 from statistics import median
@@ -28,6 +29,7 @@ MIN_FAMILY_DECKS = 200
 MIN_CLOSE_FAMILY_DECKS = 1000  # enough decks to afford requiring a closer match
 CLOSE_SHARED_CARDS = 5
 NEAR_TROPHIES_SHARE = 0.07  # "your trophy range" is within this share of the player's trophies
+STICKY_TROPHIES = 100  # cached stats about a player's range survive this much trophy movement
 MIN_TREND_GAMES = 20
 MIN_SAME_DECK_GAMES = 10  # per half, to compare a deck with itself
 MIN_DECK_TIMELINE_GAMES = 5
@@ -377,10 +379,28 @@ def _trophy_range(items: list[Game]) -> tuple[str, int, int] | None:
     latest = next((g for g in items if g["starting_trophies"]), None)
     if latest is None:
         return None
-    # Rounded, so a few games' worth of trophies keeps the same range and its cached stats.
-    level = round(latest["starting_trophies"], -2)
+    level = latest["starting_trophies"]
     band = max(200, level * NEAR_TROPHIES_SHARE)
     return latest["battle_type"], round(level - band), round(level + band)
+
+
+def _near_stat[T](a: Analyzer, key: Hashable, items: list[Game], fn: Callable[[], T]) -> T:
+    """Cache a stat about players near this one, keyed by the player (not their exact trophies).
+
+    It's reused until their trophies move more than STICKY_TROPHIES from when it was computed:
+    every game shifts the range a little, and recomputing takes seconds on a big table, while
+    a ~2,000-trophy-wide range barely changes who's in it.
+    """
+    scope = _trophy_range(items)
+
+    def fits(cached: tuple[tuple[str, int, int] | None, T]) -> bool:
+        was = cached[0]
+        if was is None or scope is None:
+            return was == scope
+        moved = abs((was[1] + was[2]) - (scope[1] + scope[2])) / 2
+        return was[0] == scope[0] and moved <= STICKY_TROPHIES
+
+    return a._field_cached(key, lambda: (scope, fn()), fits)[1]
 
 
 def near_player(decks: pl.DataFrame, items: list[Game]) -> pl.DataFrame | None:
@@ -443,7 +463,7 @@ def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game]) -> Family
             return Family(closer, is_near, CLOSE_SHARED_CARDS)
         return Family(pool, is_near, 4)
 
-    return a._field_cached(("family", tag, tuple(sorted(mine)), _trophy_range(items)), pick)
+    return _near_stat(a, ("family", tag, tuple(sorted(mine))), items, pick)
 
 
 def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
@@ -835,7 +855,7 @@ def _z(diff: float, n1: int, n2: int | None = None) -> float:
     return abs(diff) / se if se else 0.0
 
 
-def signature_card(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
+def signature_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | None:
     """The card they win with far more often than players at their trophies do."""
     cards = _cards(a)
     played: defaultdict[int, list[Game]] = defaultdict(list)
@@ -857,7 +877,7 @@ def signature_card(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
             .agg(games=pl.len(), rate=pl.col("score").mean())
         )
 
-    rates = a._field_cached(("card_rates", _trophy_range(items), tuple(sorted(used))), card_rates)
+    rates = _near_stat(a, ("card_rates", tag, tuple(sorted(used))), items, card_rates)
     best: dict[str, Any] | None = None
     best_z = 0.0
     for r in rates.iter_rows(named=True):
@@ -893,7 +913,7 @@ def unique_deck(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | No
         alike = shared.filter(pl.col("s") >= UNIQUE_DECK_SHARED)["player_tag"].n_unique()
         return alike, others["player_tag"].n_unique()
 
-    alike, total = a._field_cached(("unique", tag, key, scope), count)
+    alike, total = _near_stat(a, ("unique", tag, key), items, count)
     if total < MIN_UNIQUE_FIELD or alike > MAX_LOOKALIKES:
         return None
     return {
@@ -963,7 +983,7 @@ def surprises(a: Analyzer, tag: str, items: list[Game]) -> list[dict[str, Any]]:
     if not items:
         return []
     found = [
-        signature_card(a, items),
+        signature_card(a, tag, items),
         unique_deck(a, tag, items),
         free_wins(a, items),
         evolution_gap(a, tag, items),

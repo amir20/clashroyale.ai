@@ -360,14 +360,17 @@ class Analyzer:
             self._cache[key] = fn()
         return self._cache[key]
 
-    def _field_cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
+    def _field_cached[T](
+        self, key: Hashable, fn: Callable[[], T], fits: Callable[[T], bool] | None = None
+    ) -> T:
         """Memoize a stat over everyone's battles, which new battles barely move.
 
         It outlives appends. Once it's FIELD_REFRESH_SECONDS old, the old value is still served
-        while a background thread recomputes it, so no visitor waits for the refresh.
+        while a background thread recomputes it, so no visitor waits for the refresh. A cached
+        value that `fits` rejects is recomputed now.
         """
         hit = self._field.get(key)
-        if hit is None:
+        if hit is None or (fits is not None and not fits(hit[1])):
             value = fn()
             self._remember(key, value)
             return value

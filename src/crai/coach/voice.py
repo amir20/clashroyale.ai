@@ -367,14 +367,25 @@ LOADING_LINES = (
 )
 
 
-WAKING_UP = "I just woke up. Give me a few seconds to stretch…"
+WAKING_UP = "I just restarted, so I'm loading everyone's battles first. About 20 seconds…"
 WAKING_LINES = (
-    "Stretching my wings…",
-    "Finding my glasses. And everyone's battles.",
-    "Remembering every deck ever played. Almost there.",
-    "Coffee first. Then your deck.",
-    "Still waking up. It's a lot of battles.",
+    "Still loading everyone's battles…",
+    "Millions of battles. Almost there…",
+    "Nearly awake. Your deck is next…",
 )
+
+# What the loading screen says as each part of the report starts, and how far along it is.
+REPORT_STEPS = {
+    "data": (76, "Catching up on the latest battles…"),
+    "games": (78, "Reading your games…"),
+    "overview": (80, "Adding up your record…"),
+    "similar": (82, "Finding players with decks like yours…"),
+    "trend": (86, "Checking how you're trending…"),
+    "worst": (88, "Finding the cards that beat you…"),
+    "elixir": (90, "Comparing your elixir cost…"),
+    "replace": (92, "Picking a card worth swapping…"),
+    "surprises": (94, "Looking for things you didn't know…"),
+}
 
 
 def _tip_against(card: dict[str, Any]) -> str:

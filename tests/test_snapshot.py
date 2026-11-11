@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 from conftest import ME, START, battle
 
-from crai.analysis import analytics
+from crai.analysis import analytics, insights
 from crai.analysis.analytics import Analyzer, Filters
 from crai.storage import database as db
 from crai.storage import snapshot
@@ -170,3 +170,18 @@ def test_shared_cards_counts_overlap() -> None:
     decks = pl.DataFrame({"cards": [[1, 2, 3, 4], [5, 6, 7, 8], [1, 5, 9, 10]]})
     got = decks.select(analytics.shared_cards([1, 5, 9]))["cards"].to_list()
     assert got == [1, 1, 3]
+
+
+def test_player_stats_survive_small_trophy_moves(analyzer: Analyzer) -> None:
+    calls: list[int] = []
+
+    def stat(trophies: int) -> int:
+        items = [{"starting_trophies": trophies, "battle_type": "trail"}]
+        return insights._near_stat(
+            analyzer, ("x", ME), items, lambda: calls.append(trophies) or trophies
+        )
+
+    assert stat(14949) == 14949
+    assert stat(14979) == 14949  # 30 trophies: same people, cached
+    assert stat(15300) == 15300  # far enough to compare against different players
+    assert calls == [14949, 15300]
