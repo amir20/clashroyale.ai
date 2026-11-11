@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from conftest import ME, battle, battles, flipped
+from conftest import ME, START, battle, battles, flipped
 from legacy import make_legacy
 
 from crai.analysis.analytics import Analyzer
@@ -150,10 +150,21 @@ def test_prune_keeps_recent_and_seed_battles(db_path: Path) -> None:
         old = START_OLD
         kept = battle(old, ME, "#Q8", a_wins=True)  # ME is a seed: kept however old
         gone = battle(old, "#QQ", "#Q8", a_wins=True)
-        assert db.ingest_battlelog(conn, [kept, gone]) == 2
+        newest = battle(START, "#QQ", "#Q8", a_wins=True)
+        assert db.ingest_battlelog(conn, [kept, gone, newest]) == 3
         before = count_rows(conn, "participant_cards")
         assert db.prune_battles(conn, 14) == 1
         assert count_rows(conn, "participant_cards") == before - 16
+
+
+def test_prune_never_frees_the_newest_battle_id(db_path: Path) -> None:
+    # A crawl records an inactive player's old games last, so they hold the highest ids.
+    with db.session(db_path) as conn:
+        old = [battle(START_OLD + timedelta(minutes=i), "#QQ", "#Q8", a_wins=True) for i in (1, 2)]
+        db.ingest_battlelog(conn, old)
+        top = conn.execute("SELECT max(id) FROM battles").fetchone()[0]
+        assert db.prune_battles(conn, 14) == 1
+        assert conn.execute("SELECT max(id) FROM battles").fetchone()[0] == top
 
 
 def count_rows(conn: sqlite3.Connection, table: str) -> int:
@@ -164,7 +175,8 @@ def test_prune_keeps_the_games_of_people_who_use_rook(db_path: Path) -> None:
     with db.session(db_path) as conn:
         user = battle(START_OLD, "#QQ", "#Q8", a_wins=True)
         stranger = battle(START_OLD, "#QV", "#Q8", a_wins=True)
-        db.ingest_battlelog(conn, [user, stranger])
+        newest = battle(START, "#QV", "#Q8", a_wins=True)
+        db.ingest_battlelog(conn, [user, stranger, newest])
         db.mark_battlelog_fetched(conn, "#QQ")
         db.track_player(conn, "#QQ")
         assert db.prune_battles(conn, 14) == 1

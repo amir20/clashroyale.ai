@@ -22,7 +22,7 @@ import os
 import re
 import shutil
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,6 +34,7 @@ from crai.storage.schema import LegacySchemaError, is_legacy
 log = logging.getLogger(__name__)
 
 MAX_PARTS = 16  # compact into one part beyond this
+CHUNK_BATTLES = 200_000  # battle ids read per part, so a full rebuild never holds every row
 _PART = re.compile(r"decks-(\d{9})-(\d{9})\.parquet")
 
 # One row per player per 1v1 battle with a full 8-card deck.
@@ -127,6 +128,7 @@ def sync(db_path: Path) -> int:
 
 def _sync(db_path: Path) -> int:
     d = snapshot_dir(db_path)
+    appended = 0
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60)) as conn:
         if is_legacy(conn):
             raise LegacySchemaError(db_path)
@@ -139,37 +141,68 @@ def _sync(db_path: Path) -> int:
             start = 0
         if latest == start:
             return 0
-        df = _read_range(conn, start + 1, latest)
-    _write(d, start + 1, latest, df)
-    log.debug("snapshot: appended %d rows (battles %d..%d)", df.height, start + 1, latest)
+        # One part per chunk of battle ids. Memory stays flat however far behind the snapshot
+        # is, and a rebuild that gets interrupted resumes from the last part it wrote.
+        while start < latest:
+            row = conn.execute("SELECT min(rowid) FROM battles WHERE rowid > ?", (start,))
+            lo: int = row.fetchone()[0]
+            hi = min(lo + CHUNK_BATTLES - 1, latest)
+            df = _read_range(conn, lo, hi)
+            # An empty chunk is skipped (the next part's range covers the gap), except the last
+            # one, which always lands so the snapshot records that it reached `latest`.
+            if df.height or hi == latest:
+                _write(d, start + 1, hi, df)
+                appended += df.height
+                log.debug("snapshot: appended %d rows (battles %d..%d)", df.height, lo, hi)
+            start = hi
     if len(_parts(d)) > MAX_PARTS:
         _compact(d)
-    return df.height
+    return appended
 
 
 def _compact(d: Path) -> None:
-    """Merge all parts into one."""
+    """Merge all parts into one, streaming so the merged table is never held in memory."""
     parts = _parts(d)
     if len(parts) <= 1:
         return
-    merged = pl.read_parquet([p for _, _, p in parts])
-    _write(d, parts[0][0], parts[-1][1], merged)
+    final = d / f"decks-{parts[0][0]:09d}-{parts[-1][1]:09d}.parquet"
+    tmp = d / f".{final.name}.{os.getpid()}.tmp"
+    pl.scan_parquet([p for _, _, p in parts]).sink_parquet(tmp, compression="zstd")
+    tmp.replace(final)  # atomic
     for _, _, p in parts:
-        p.unlink(missing_ok=True)
+        if p != final:
+            p.unlink(missing_ok=True)
 
 
-def read(db_path: Path, days: int = 0) -> tuple[int, pl.DataFrame]:
-    """Sync, then return (covered rowid, all deck appearances)."""
+def read(
+    db_path: Path,
+    days: int = 0,
+    after: int = 0,
+    transform: Callable[[pl.LazyFrame], pl.LazyFrame] | None = None,
+) -> tuple[int, pl.DataFrame]:
+    """Sync, then return (covered rowid, deck appearances).
+
+    `days` keeps only recent battles. `after` keeps only battles with a higher id, so a reader
+    that already holds everything up to it can fetch just what's new. `transform` runs while
+    reading, which is faster than changing the collected table.
+    """
     with _locked(db_path):
         _sync(db_path)
-        parts = _parts(snapshot_dir(db_path))
+        parts = [p for p in _parts(snapshot_dir(db_path)) if p[1] > after]
         if not parts:
             empty = pl.DataFrame(schema=_schema()).drop("result")
-            return 0, empty.with_columns(
+            scan = empty.with_columns(
                 score=pl.lit(None, pl.Float64()), cards=pl.lit(None, pl.List(pl.Int64()))
-            )
+            ).lazy()
+            return covered_rowid(db_path), (transform(scan) if transform else scan).collect()
         scan = pl.scan_parquet([p for *_, p in parts])
+        if after:
+            scan = scan.filter(pl.col("battle_id") > after)
         if days:  # keep long-running servers from loading every battle ever crawled
-            cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            scan = scan.filter(pl.col("battle_time") >= cutoff)
-        return parts[-1][1], scan.collect()
+            scan = scan.filter(pl.col("battle_time") >= cutoff(days))
+        return parts[-1][1], (transform(scan) if transform else scan).collect()
+
+
+def cutoff(days: int) -> str:
+    """The `battle_time` before which a battle is older than `days`."""
+    return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")

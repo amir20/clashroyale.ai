@@ -21,6 +21,8 @@ from crai.web.service import DAILY_QUESTIONS, QuestionId, Service
 
 DAILY_SUGGESTIONS = 40
 
+log = logging.getLogger(__name__)
+
 
 async def as_stream(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
     async for event in events:
@@ -34,11 +36,20 @@ def create_app(
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     svc = Service(settings or get_settings(), transport)
 
+    def warm_up() -> None:
+        started = time.monotonic()
+        try:
+            svc.warm_up()
+        except Exception:
+            log.exception("warm-up failed")
+            return
+        log.info("warm-up done in %.2fs", time.monotonic() - started)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         # Warm the analytics cache so the first visitor isn't the one who waits for it.
         if svc.settings.db_path.exists():
-            app.state.warm = asyncio.create_task(asyncio.to_thread(svc.analyzer.decks))
+            app.state.warm = asyncio.create_task(asyncio.to_thread(warm_up))
         yield
 
     app = FastAPI(title="Rook", lifespan=lifespan)

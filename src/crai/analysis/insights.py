@@ -18,6 +18,7 @@ from crai.analysis.analytics import (
     Analyzer,
     Filters,
     _margin,
+    shared_cards,
 )
 from crai.collect.client import normalize_tag
 
@@ -319,6 +320,25 @@ def trend(a: Analyzer, items: list[Game]) -> dict[str, Any]:
     }
 
 
+def elixir_table(a: Analyzer) -> pl.DataFrame:
+    """Games and wins at each average deck cost, over everyone's battles."""
+    cost = {c: e for c, e in a._elixir().items() if e is not None}
+
+    def table() -> pl.DataFrame:
+        each = pl.element().replace_strict(cost, default=None, return_dtype=pl.Float64)
+        return (
+            # Each distinct deck once: about half the work of pricing every row.
+            a.decks()
+            .group_by("deck_key")
+            .agg(cards=pl.col("cards").first(), games=pl.len(), wins=pl.col("score").sum())
+            .with_columns(avg=pl.col("cards").list.eval(each).list.mean())
+            .group_by("avg")
+            .agg(pl.col("games").sum(), pl.col("wins").sum())
+        )
+
+    return a._field_cached("elixir_table", table)
+
+
 def elixir_standing(a: Analyzer, items: list[Game]) -> dict[str, Any]:
     """How this deck's cost compares with every deck played, and how each cost range does."""
     key = current_deck_key(items)
@@ -327,16 +347,7 @@ def elixir_standing(a: Analyzer, items: list[Game]) -> dict[str, Any]:
     cost = {c: e for c, e in a._elixir().items() if e is not None}
     mine = sum(cost[c] for c in _ids(key) if c in cost) / 8
 
-    def table() -> pl.DataFrame:
-        each = pl.element().replace_strict(cost, default=None, return_dtype=pl.Float64)
-        return (
-            a.decks()
-            .with_columns(avg=pl.col("cards").list.eval(each).list.mean())
-            .group_by("avg")
-            .agg(games=pl.len(), wins=pl.col("score").sum())
-        )
-
-    costs = a._cached("elixir_table", table)
+    costs = elixir_table(a)
     total = int(costs["games"].sum()) or 1
     bands = (
         costs.with_columns(start=(pl.col("avg") * 2).floor() / 2)
@@ -366,7 +377,8 @@ def _trophy_range(items: list[Game]) -> tuple[str, int, int] | None:
     latest = next((g for g in items if g["starting_trophies"]), None)
     if latest is None:
         return None
-    level = latest["starting_trophies"]
+    # Rounded, so a few games' worth of trophies keeps the same range and its cached stats.
+    level = round(latest["starting_trophies"], -2)
     band = max(200, level * NEAR_TROPHIES_SHARE)
     return latest["battle_type"], round(level - band), round(level + band)
 
@@ -413,23 +425,25 @@ class Family:
 def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game]) -> Family:
     """Comparable decks: near the player's trophies and sharing 5+ cards, when there are enough."""
 
-    def pick() -> Family:
-        others = (
-            a.decks()
-            .filter(pl.col("player_tag") != tag)
-            .with_columns(shared=pl.col("cards").list.set_intersection(mine).list.len())
+    def alike(decks: pl.DataFrame) -> pl.DataFrame:
+        return (
+            decks.filter(pl.col("player_tag") != tag)
+            .with_columns(shared=shared_cards(mine))
             .filter(pl.col("shared").is_between(4, 7))
         )
-        near = near_player(others, items)
+
+    def pick() -> Family:
+        # Players at their trophies first: a much smaller table to compare decks in.
+        field = near_player(a.decks(), items)
+        near = alike(field) if field is not None else None
         is_near = near is not None and near.height >= MIN_FAMILY_DECKS
-        pool = near if is_near and near is not None else others
+        pool = near if is_near and near is not None else alike(a.decks())
         closer = pool.filter(pl.col("shared") >= CLOSE_SHARED_CARDS)
         if closer.height >= MIN_CLOSE_FAMILY_DECKS:
             return Family(closer, is_near, CLOSE_SHARED_CARDS)
         return Family(pool, is_near, 4)
 
-    latest = items[0]["battle_id"] if items else None
-    return a._cached(("family", tag, tuple(sorted(mine)), latest), pick)
+    return a._field_cached(("family", tag, tuple(sorted(mine)), _trophy_range(items)), pick)
 
 
 def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
@@ -823,9 +837,6 @@ def _z(diff: float, n1: int, n2: int | None = None) -> float:
 
 def signature_card(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
     """The card they win with far more often than players at their trophies do."""
-    field = near_player(a.decks(), items)
-    if field is None or field.height < MIN_FAMILY_DECKS:
-        field = a.decks()
     cards = _cards(a)
     played: defaultdict[int, list[Game]] = defaultdict(list)
     for g in items:
@@ -834,12 +845,19 @@ def signature_card(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
     used = [c for c, gs in played.items() if len(gs) >= MIN_SIGNATURE_GAMES and c in cards]
     if not used:
         return None
-    rates = (
-        field.explode("cards")
-        .filter(pl.col("cards").is_in(used))
-        .group_by("cards")
-        .agg(games=pl.len(), rate=pl.col("score").mean())
-    )
+
+    def card_rates() -> pl.DataFrame:
+        field = near_player(a.decks(), items)
+        if field is None or field.height < MIN_FAMILY_DECKS:
+            field = a.decks()
+        return (
+            field.explode("cards")
+            .filter(pl.col("cards").is_in(used))
+            .group_by("cards")
+            .agg(games=pl.len(), rate=pl.col("score").mean())
+        )
+
+    rates = a._field_cached(("card_rates", _trophy_range(items), tuple(sorted(used))), card_rates)
     best: dict[str, Any] | None = None
     best_z = 0.0
     for r in rates.iter_rows(named=True):
@@ -862,19 +880,20 @@ def signature_card(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
 
 def unique_deck(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | None:
     """Almost nobody at their trophies plays anything like their deck."""
-    key = current_deck_key(items)
-    field = near_player(a.decks(), items)
-    if key is None or field is None:
+    key, scope = current_deck_key(items), _trophy_range(items)
+    if key is None or scope is None:
         return None
     mine = _ids(key)
 
     def count() -> tuple[int, int]:
+        field = near_player(a.decks(), items)
+        assert field is not None  # scope is known
         others = field.filter(pl.col("player_tag") != tag)
-        shared = others.with_columns(s=pl.col("cards").list.set_intersection(mine).list.len())
+        shared = others.with_columns(s=shared_cards(mine))
         alike = shared.filter(pl.col("s") >= UNIQUE_DECK_SHARED)["player_tag"].n_unique()
         return alike, others["player_tag"].n_unique()
 
-    alike, total = a._cached(("unique", tag, key), count)
+    alike, total = a._field_cached(("unique", tag, key, scope), count)
     if total < MIN_UNIQUE_FIELD or alike > MAX_LOOKALIKES:
         return None
     return {

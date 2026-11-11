@@ -10,7 +10,14 @@ from typing import Any
 
 import polars as pl
 
-from crai.analysis.analytics import DEFAULT_FILTERS, Analyzer, CardRef, DeckResult, Filters
+from crai.analysis.analytics import (
+    DEFAULT_FILTERS,
+    Analyzer,
+    CardRef,
+    DeckResult,
+    Filters,
+    shared_cards,
+)
 from crai.analysis.insights import (
     CLOSE_SHARED_CARDS,
     MEANINGFUL_GAIN,
@@ -62,7 +69,7 @@ def _swap_pools(
     rest = (
         a.decks()
         .filter(pl.col("player_tag") != tag, has_first != has_second)
-        .with_columns(shared=pl.col("cards").list.set_intersection(others).list.len())
+        .with_columns(shared=shared_cards(others))
     )
     near = near_player(rest, items)
     for pool, is_near in [*([(near, True)] if near is not None else []), (rest, False)]:

@@ -410,11 +410,16 @@ def prune_battles(conn: sqlite3.Connection, days: int) -> int:
     Seeds are the top players and you, and tracked players are everyone who has used Rook, so
     their own history is never removed. Freed pages are
     reused by later crawls, so the database file stops growing instead of shrinking.
+
+    The newest battle id is always kept, even when that battle is old (a crawl records old
+    games from inactive players last). SQLite hands out max(id) + 1, so deleting the top id
+    would let the next crawl reuse ids the Parquet snapshot already covers.
     """
     cutoff = f"-{days} days"
     old = conn.execute(
         """SELECT b.id FROM battles b
            WHERE b.battle_time < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)
+             AND b.id < (SELECT max(id) FROM battles)
              AND NOT EXISTS (
                SELECT 1 FROM battle_participants bp JOIN players p ON p.tag = bp.player_tag
                WHERE bp.battle_id = b.id AND (p.is_seed = 1 OR p.is_tracked = 1))""",

@@ -9,6 +9,7 @@ from typing import Any
 
 from crai.coach import voice
 from crai.collect.client import ClashAPIError, normalize_tag
+from crai.timing import Laps
 from crai.web.service import FRESH_SECONDS, HEARTBEAT_SECONDS, Service
 
 log = logging.getLogger(__name__)
@@ -44,11 +45,16 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
     async def emit(event: dict[str, Any]) -> None:
         await queue.put(event)
 
+    laps = Laps()
+    outcome = "cancelled"  # until it finishes one way or another
+
     async def run() -> None:
+        nonlocal outcome
         try:
             try:
                 tag = normalize_tag(raw_tag)
             except ValueError:
+                outcome = "bad tag"
                 await emit(
                     {
                         "type": "error",
@@ -60,7 +66,8 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
             await emit(
                 {"type": "status", "step": "lookup", "progress": 8, "message": "Looking you up…"}
             )
-            known = await asyncio.to_thread(svc.known, tag)
+            with laps.lap("lookup"):
+                known = await asyncio.to_thread(svc.known, tag)
             fresh = time.monotonic() - svc.fetched_at.get(tag, -1e9) < FRESH_SECONDS
             if not fresh:
                 intro = (
@@ -82,8 +89,10 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                     async with svc.client() as c:
                         return await asyncio.gather(c.player(tag), c.battlelog(tag))
 
-                profile, battles = await with_heartbeat(fetch(), emit, "fetch", 0)
+                with laps.lap("fetch"):
+                    profile, battles = await with_heartbeat(fetch(), emit, "fetch", 0)
                 if profile is None:
+                    outcome = "not found"
                     await emit(
                         {
                             "type": "error",
@@ -100,10 +109,15 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                         "message": f"Reading {len(battles)} battles…",
                     }
                 )
-                async with svc.lock:
-                    await with_heartbeat(
-                        asyncio.to_thread(svc.store, profile, battles, tag), emit, "store", 2
-                    )
+                with laps.lap("wait"):
+                    await svc.lock.acquire()
+                try:
+                    with laps.lap("store"):
+                        await with_heartbeat(
+                            asyncio.to_thread(svc.store, profile, battles, tag), emit, "store", 2
+                        )
+                finally:
+                    svc.lock.release()
                 svc.fetched_at[tag] = time.monotonic()
             await emit(
                 {
@@ -113,13 +127,20 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                     "message": "Comparing you with everyone else…",
                 }
             )
-            async with svc.lock:
-                report = await with_heartbeat(
-                    asyncio.to_thread(svc.report, tag), emit, "analyze", 4
-                )
+            with laps.lap("wait"):
+                await svc.lock.acquire()
+            try:
+                with laps.lap("analyze"):
+                    report = await with_heartbeat(
+                        asyncio.to_thread(svc.report, tag), emit, "analyze", 4
+                    )
+            finally:
+                svc.lock.release()
+            outcome = "ok"
             await emit({"type": "status", "step": "done", "progress": 100, "message": "Got it."})
             await emit({"type": "ready", "report": report})
         except ClashAPIError as e:
+            outcome = "api error"
             log.warning("API error loading %s: %s", raw_tag, e)
             await emit(
                 {
@@ -129,6 +150,7 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                 }
             )
         except Exception:
+            outcome = "failed"
             log.exception("failed loading %s", raw_tag)
             await emit(
                 {
@@ -146,3 +168,4 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
             yield sse(event)
     finally:
         task.cancel()
+        log.info("load %s %s in %.2fs (%s)", raw_tag, outcome, laps.total, laps)

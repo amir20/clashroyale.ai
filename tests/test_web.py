@@ -51,6 +51,21 @@ def test_never_seen_player_reports_every_step(db_path: Path) -> None:
     assert ready["report"]["intro"]
 
 
+def test_each_load_logs_where_its_time_went(
+    db_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="crai")
+    with client(db_path) as c:
+        c.get(f"/api/players/{ME[1:]}/load")
+    load = next(r.message for r in caplog.records if r.message.startswith("load "))
+    assert load.startswith("load 2P ok in ")
+    for step in ("lookup", "fetch", "wait", "store", "analyze"):
+        assert f"{step} " in load
+    report = next(r.message for r in caplog.records if r.message.startswith("report "))
+    assert "similar" in report and "surprises" in report
+    assert any(r.message.startswith("stored #2P") for r in caplog.records)
+
+
 @pytest.mark.parametrize(
     ("tag", "code"), [("ABC", "bad_tag"), ("UUU", "not_found")], ids=["invalid", "missing"]
 )

@@ -1,6 +1,7 @@
 """Shared state behind the routes: building reports, answering questions, and usage limits."""
 
 import asyncio
+import logging
 import sqlite3
 import time
 from collections import defaultdict, deque
@@ -18,6 +19,9 @@ from crai.collect.client import ClashClient
 from crai.config import Settings
 from crai.storage import database as db
 from crai.storage import snapshot
+from crai.timing import Laps
+
+log = logging.getLogger(__name__)
 
 FRESH_SECONDS = 600
 DAILY_QUESTIONS = 5
@@ -96,6 +100,12 @@ class Service:
             self.settings.api_tokens, self.settings.api_base, transport=self.transport
         )
 
+    def warm_up(self) -> None:
+        """Load the deck table and the stats every report shares, before anyone asks."""
+        self.analyzer.decks()
+        insights.elixir_table(self.analyzer)
+        insights.playable_cards(self.analyzer)
+
     def known(self, tag: str) -> bool:
         if not self.settings.db_path.exists():
             return False
@@ -106,46 +116,65 @@ class Service:
         return bool(row and row[0])
 
     def store(self, profile: Any, battles: list[Any], tag: str) -> int:
-        with db.session(self.settings.db_path) as conn:
+        laps = Laps()
+        with laps.lap("sqlite"), db.session(self.settings.db_path) as conn:
             db.upsert_player(conn, profile)
             new = db.ingest_battlelog(conn, battles)
             db.mark_battlelog_fetched(conn, tag)
             db.track_player(conn, tag)
-        snapshot.sync(self.settings.db_path)
+        with laps.lap("snapshot"):
+            snapshot.sync(self.settings.db_path)
+        log.info("stored %s: %d new battles in %.2fs (%s)", tag, new, laps.total, laps)
         return new
 
     def report(self, tag: str) -> dict[str, Any]:
-        items = insights.games(self.analyzer, tag)
-        overview = insights.overview(self.analyzer, tag, items)
-        patterns = insights.wins_and_losses(items)
-        similar = insights.similar_battles(self.analyzer, tag, items) if items else None
+        a, laps = self.analyzer, Laps()
+        with laps.lap("data"):
+            a.decks()  # loads or refreshes the shared table, so its cost shows on its own
+        with laps.lap("games"):
+            items = insights.games(a, tag)
+        with laps.lap("overview"):
+            overview = insights.overview(a, tag, items)
+            patterns = insights.wins_and_losses(items)
+        with laps.lap("similar"):
+            similar = insights.similar_battles(a, tag, items) if items else None
+        story = self.story(tag, items, laps)
+        with laps.lap("cards"):
+            cards = insights.playable_cards(a)
+        log.info("report %s in %.2fs (%s)", tag, laps.total, laps)
         return {
             "overview": overview,
             "intro": voice.intro(overview),
             "similar": similar,
             "patterns": patterns,
             "patterns_line": voice.wins_and_losses(patterns),
-            "story": self.story(tag, items),
-            "cards": insights.playable_cards(self.analyzer),
+            "story": story,
+            "cards": cards,
             "questions": [{"id": k, "label": v} for k, v in QUESTIONS.items()],
             "custom_questions_per_day": DAILY_QUESTIONS,
             "ai_enabled": bool(self.settings.openrouter_key),
             "dev": self.settings.dev,
         }
 
-    def story(self, tag: str, items: list[insights.Game]) -> dict[str, Any]:
+    def story(self, tag: str, items: list[insights.Game], laps: Laps) -> dict[str, Any]:
         """The swipeable cards, computed with no AI call. A card with no data is None."""
         a = self.analyzer
 
         def usable(view: dict[str, Any]) -> dict[str, Any] | None:
             return None if "error" in view else view
 
-        trend = usable(visuals.trend_view(a, items))
-        close = usable(visuals.close_games_view(items))
-        worst = usable(visuals.worst_matchups_view(a, items))
-        elixir = usable(visuals.elixir_view(a, items))
-        replace = insights.replace_card(a, tag, items)
-        found = insights.surprises(a, tag, items)
+        with laps.lap("trend"):
+            trend = usable(visuals.trend_view(a, items))
+        with laps.lap("close"):
+            close = usable(visuals.close_games_view(items))
+        with laps.lap("worst"):
+            worst = usable(visuals.worst_matchups_view(a, items))
+        with laps.lap("elixir"):
+            elixir = usable(visuals.elixir_view(a, items))
+        with laps.lap("replace"):
+            replace = insights.replace_card(a, tag, items)
+        with laps.lap("surprises"):
+            found = insights.surprises(a, tag, items)
         return {
             "surprises": [x | voice.surprise(x) for x in found],
             "trend": trend,

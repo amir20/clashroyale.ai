@@ -6,21 +6,26 @@ toward 50% (`adj_win_rate`) so tiny samples don't dominate rankings.
 """
 
 import difflib
+import logging
 import re
 import sqlite3
+import threading
+import time
 from collections.abc import Callable, Hashable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, TypeIs
 
 lazy import polars as pl
 
 from crai.collect.client import normalize_tag
 from crai.storage import database as db
 from crai.storage import snapshot
+
+log = logging.getLogger(__name__)
 
 # Battle types that don't reflect real deck strength.
 EXCLUDED_TYPES = (
@@ -31,6 +36,10 @@ EXCLUDED_TYPES = (
     "unknown",
     "tutorial",
 )
+MAX_CHUNKS = 8  # appends add chunks; past this, merge them (many chunks slow list ops)
+TRIM_SECONDS = 6 * 3600  # how often a windowed table drops battles that aged out
+FIELD_REFRESH_SECONDS = 2 * 3600  # field-wide stats are recomputed in the background after this
+MAX_FIELD_ENTRIES = 64
 PRIOR_GAMES = 20  # strength of the 50% prior in adj_win_rate
 
 type CardRef = str | int
@@ -219,55 +228,167 @@ def records(df: pl.DataFrame, limit: int | None = None) -> list[Row]:
     return df.with_columns(pl.col(pl.Float64, pl.Float32).round(3)).to_dicts()
 
 
+def _is_decks(key: Hashable) -> TypeIs[tuple[str, Filters]]:
+    """A cached filtered copy of the deck table (see `Analyzer.decks`)."""
+    return isinstance(key, tuple) and key[0] == "decks"
+
+
+def shared_cards(ids: Sequence[int]) -> pl.Expr:
+    """How many of `ids` each deck has (~10x faster than list.set_intersection)."""
+    return pl.col("cards").list.eval(pl.element().is_in(list(ids))).list.sum()
+
+
 class Analyzer:
     def __init__(self, db_path: Path | str, window_days: int = 0) -> None:
         self.db_path = Path(db_path)
         self.window_days = window_days  # 0 = load every battle in the snapshot
         self._cache: dict[Hashable, Any] = {}
-        self._base_key: tuple[int, int] | None = None
+        self._field: dict[Hashable, tuple[float, Any]] = {}  # see _field_cached
+        self._refreshing: set[Hashable] = set()
         self._base_df: pl.DataFrame | None = None
+        self._covered = 0  # the snapshot rowid _base_df reaches
+        self._seeds: frozenset[str] = frozenset()
+        self._trimmed_at = 0.0  # when rows older than the window were last dropped
+        # One load at a time: the server warms up in a thread while the first visitor arrives.
+        self._load_lock = threading.Lock()
 
     # ------------------------------------------------------------ plumbing
 
     def _base(self) -> pl.DataFrame:
         """All deck appearances from the Parquet snapshot (synced first), with `is_top`.
 
-        Cached until the snapshot covers new battles or the set of seed players changes.
+        Loaded once. After that, new battles are appended and the seed flag is updated in
+        place: reloading tens of millions of rows takes ~20 s on a small server.
         """
         if not self.db_path.exists():
             raise FileNotFoundError(f"No database at {self.db_path}. Run `crai crawl` first.")
-        snapshot.sync(self.db_path)
-        with self.session() as conn:
-            seeds = tuple(r[0] for r in conn.execute("SELECT tag FROM players WHERE is_seed = 1"))
-        key = (snapshot.covered_rowid(self.db_path), hash(seeds))
-        if key != self._base_key or self._base_df is None:
-            _, raw = snapshot.read(self.db_path, self.window_days)
-            # rechunk: Parquet parts arrive as several chunks, which makes list ops ~3x slower.
-            # Repeated strings become categories and floats shrink: about half the memory, so
-            # the server can hold twice the battles.
-            self._base_df = (
-                raw.with_columns(
-                    is_top=pl.col("player_tag").is_in(seeds).cast(pl.Int8()),
-                    score=pl.col("score").cast(pl.Float32()),
-                )
-                .with_columns(
-                    pl.col("player_tag", "deck_key", "battle_type", "deck_selection").cast(
-                        pl.Categorical()
-                    )
-                )
-                .rechunk()
+        with self._load_lock:
+            snapshot.sync(self.db_path)
+            with self.session() as conn:
+                rows = conn.execute("SELECT tag FROM players WHERE is_seed = 1")
+                seeds = frozenset(r[0] for r in rows)
+            covered = snapshot.covered_rowid(self.db_path)
+            if self._base_df is None or covered < self._covered:  # first load, or a rebuild
+                self._load(seeds)
+            elif covered > self._covered or seeds != self._seeds:
+                self._append(seeds)
+            if self.window_days and time.monotonic() - self._trimmed_at > TRIM_SECONDS:
+                self._trim()
+            assert self._base_df is not None
+            return self._base_df
+
+    def _prepare(self, seeds: frozenset[str]) -> Callable[[pl.LazyFrame], pl.LazyFrame]:
+        """Shape the rows as they're read. Repeated strings become categories and floats shrink:
+        about half the memory, so the server can hold twice the battles."""
+
+        def shape(scan: pl.LazyFrame) -> pl.LazyFrame:
+            return scan.with_columns(
+                pl.col("player_tag", "deck_key", "battle_type", "deck_selection").cast(
+                    pl.Categorical()
+                ),
+                is_top=pl.col("player_tag").is_in(list(seeds)).cast(pl.Int8()),
+                score=pl.col("score").cast(pl.Float32()),
             )
-            self._base_key = key
-            self._cache.clear()
-        return self._base_df
+
+        return shape
+
+    def _load(self, seeds: frozenset[str]) -> None:
+        started = time.perf_counter()
+        self._covered, raw = snapshot.read(self.db_path, self.window_days, 0, self._prepare(seeds))
+        # rechunk: Parquet parts arrive as several chunks, which makes list ops ~3x slower.
+        self._base_df = raw.rechunk()
+        self._seeds, self._trimmed_at = seeds, time.monotonic()
+        self._cache.clear()
+        self._field.clear()
+        log.info(
+            "analytics: loaded %d deck rows (%.0f MB) in %.2fs",
+            self._base_df.height,
+            self._base_df.estimated_size("mb"),
+            time.perf_counter() - started,
+        )
+
+    def _append(self, seeds: frozenset[str]) -> None:
+        """Add battles the snapshot gained since the last load, and refresh the seed flags."""
+        assert self._base_df is not None
+        started = time.perf_counter()
+        covered, new = snapshot.read(
+            self.db_path, self.window_days, self._covered, self._prepare(seeds)
+        )
+        reflag = seeds != self._seeds
+
+        def grow(d: pl.DataFrame, rows: pl.DataFrame) -> pl.DataFrame:
+            if reflag:
+                d = d.with_columns(is_top=pl.col("player_tag").is_in(list(seeds)).cast(pl.Int8()))
+            d = pl.concat([d, rows]) if rows.height else d
+            return d.rechunk() if d.n_chunks() > MAX_CHUNKS else d
+
+        self._base_df = grow(self._base_df, new)
+        # Filtered copies grow by the same rows instead of filtering everything again. Field-wide
+        # stats in `_field` stay: a few hundred battles don't move them.
+        self._cache = {
+            k: grow(v, self._filter(new, k[1])) for k, v in self._cache.items() if _is_decks(k)
+        }
+        self._covered, self._seeds = covered, seeds
+        log.info(
+            "analytics: added %d deck rows%s in %.2fs",
+            new.height,
+            " and updated top players" if reflag else "",
+            time.perf_counter() - started,
+        )
+
+    def _trim(self) -> None:
+        """Drop battles that have aged out of the window, so memory stays flat."""
+        assert self._base_df is not None
+        started = time.perf_counter()
+        keep = pl.col("battle_time") >= snapshot.cutoff(self.window_days)
+        before = self._base_df.height
+        self._base_df = self._base_df.filter(keep).rechunk()
+        self._cache = {k: v.filter(keep).rechunk() for k, v in self._cache.items() if _is_decks(k)}
+        self._trimmed_at = time.monotonic()
+        log.info(
+            "analytics: dropped %d deck rows older than %d days in %.2fs",
+            before - self._base_df.height,
+            self.window_days,
+            time.perf_counter() - started,
+        )
 
     def _cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
-        """Memoize until the snapshot changes (`_base` clears this cache)."""
+        """Memoize until the table changes (`_base` drops or grows these)."""
         if key not in self._cache:
             if len(self._cache) > 32:
                 self._cache.clear()
             self._cache[key] = fn()
         return self._cache[key]
+
+    def _field_cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
+        """Memoize a stat over everyone's battles, which new battles barely move.
+
+        It outlives appends. Once it's FIELD_REFRESH_SECONDS old, the old value is still served
+        while a background thread recomputes it, so no visitor waits for the refresh.
+        """
+        hit = self._field.get(key)
+        if hit is None:
+            value = fn()
+            self._remember(key, value)
+            return value
+        at, value = hit
+        if time.monotonic() - at > FIELD_REFRESH_SECONDS and key not in self._refreshing:
+            self._refreshing.add(key)
+            threading.Thread(target=self._refresh, args=(key, fn), daemon=True).start()
+        return value
+
+    def _refresh(self, key: Hashable, fn: Callable[[], Any]) -> None:
+        try:
+            self._remember(key, fn())
+        except Exception:
+            log.exception("refreshing %r failed", key)
+        finally:
+            self._refreshing.discard(key)
+
+    def _remember(self, key: Hashable, value: Any) -> None:
+        if len(self._field) >= MAX_FIELD_ENTRIES:  # drop the oldest
+            del self._field[min(self._field, key=lambda k: self._field[k][0])]
+        self._field[key] = (time.monotonic(), value)
 
     def session(self) -> AbstractContextManager[sqlite3.Connection]:
         if not self.db_path.exists():
