@@ -47,7 +47,8 @@ async def with_heartbeat[T](
         )
 
 
-async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
+async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIterator[str]:
+    """Stream a player's report. `them` means the viewer is looking someone else up."""
     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
     async def emit(event: dict[str, Any]) -> None:
@@ -99,17 +100,30 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                 )
                 return
             await emit(
-                {"type": "status", "step": "lookup", "progress": 8, "message": "Looking you up…"}
+                {
+                    "type": "status",
+                    "step": "lookup",
+                    "progress": 8,
+                    "message": "Looking them up…" if them else "Looking you up…",
+                }
             )
             with laps.lap("lookup"):
                 known = await asyncio.to_thread(svc.known, tag)
             fresh = time.monotonic() - svc.fetched_at.get(tag, -1e9) < FRESH_SECONDS
             if not fresh:
-                intro = (
-                    "Pulling your latest battles…"
-                    if known
-                    else "Never seen you before. Fetching your whole story…"
-                )
+                if them:
+                    intro = (
+                        "Pulling their latest battles…"
+                        if known
+                        else "Never seen them before. Fetching their battles…"
+                    )
+                else:
+                    intro = (
+                        "Pulling your latest battles…"
+                        if known
+                        else "Never seen you before. Fetching your whole story…"
+                    )
+                lines = voice.SCOUT_LINES if them else voice.LOADING_LINES
                 await emit(
                     {
                         "type": "status",
@@ -125,7 +139,7 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                         return await asyncio.gather(c.player(tag), c.battlelog(tag))
 
                 with laps.lap("fetch"):
-                    profile, battles = await with_heartbeat(fetch(), emit, "fetch", 0)
+                    profile, battles = await with_heartbeat(fetch(), emit, "fetch", 0, lines)
                 if profile is None:
                     outcome = "not found"
                     await emit(
@@ -150,7 +164,11 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                 try:
                     with laps.lap("store"):
                         await with_heartbeat(
-                            asyncio.to_thread(svc.store, profile, battles, tag), emit, "store", 2
+                            asyncio.to_thread(svc.store, profile, battles, tag),
+                            emit,
+                            "store",
+                            2,
+                            lines,
                         )
                 finally:
                     svc.lock.release()
@@ -161,7 +179,9 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                     "type": "status",
                     "step": "analyze",
                     "progress": 74,
-                    "message": "Comparing you with everyone else…",
+                    "message": "Comparing them with everyone else…"
+                    if them
+                    else "Comparing you with everyone else…",
                 }
             )
             with laps.lap("wait"):
@@ -169,8 +189,9 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
             loop = asyncio.get_running_loop()
 
             def on_step(name: str) -> None:  # runs in the report's thread
-                if name in voice.REPORT_STEPS:
-                    progress, message = voice.REPORT_STEPS[name]
+                steps = voice.SCOUT_STEPS if them else voice.REPORT_STEPS
+                if name in steps:
+                    progress, message = steps[name]
                     event = {
                         "type": "status",
                         "step": name,

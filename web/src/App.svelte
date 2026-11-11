@@ -14,6 +14,9 @@
   let error = $state("");
   let shaking = $state(false);
   let tag = $state("");
+  // The viewer's own tag. Any other report (an opponent's) is about "them", not "you".
+  let me = $state("");
+  const them = $derived(!!me && tag !== me);
   let report = $state<Report | null>(null);
   let view = $state<"story" | "chat">("story");
   let chat = $state<Ask>();
@@ -28,11 +31,20 @@
       (phase === "loading"
         ? status
         : phase === "report"
-          ? "There you are. Let's see the damage."
+          ? them
+            ? `Here's ${report?.overview.player.name ?? "them"}.`
+            : "There you are. Let's see the damage."
           : "Give me your tag and I'll tell you the truth about your deck."),
   );
 
+  const urlFor = (t: string) => (me && t !== me ? `?tag=${t}&vs=${me}` : `?tag=${t}`);
+
   function fail(message: string) {
+    if (them) {
+      // Looking up an opponent failed: offer the viewer's own tag again, not the opponent's.
+      tag = input = me;
+      history.replaceState(null, "", urlFor(me));
+    }
     phase = "landing";
     error = message;
     shaking = true;
@@ -49,8 +61,9 @@
       report = e.report;
       view = "story";
       phase = "report";
-      localStorage.setItem("rook-tag", tag);
-      history.replaceState(null, "", `?tag=${tag}`);
+      if (!them) localStorage.setItem("rook-tag", tag);
+      history.replaceState(null, "", urlFor(tag));
+      scrollTo(0, 0);
     }
   }
 
@@ -61,10 +74,12 @@
     if (question) chat?.ask(question, id);
   }
 
-  function start(raw: string) {
+  /** Load a report. Without `as`, the tag is the viewer's own. */
+  function start(raw: string, as?: string) {
     const cleaned = cleanTag(raw);
     if (cleaned.length < 3) return fail("That's too short to be a tag. Nice try.");
     stop?.();
+    me = as ? cleanTag(as) : cleaned;
     tag = cleaned;
     input = cleaned;
     error = "";
@@ -72,7 +87,28 @@
     progress = 3;
     status = "Waking up…";
     phase = "loading";
-    stop = loadPlayer(cleaned, onEvent);
+    stop = loadPlayer(cleaned, onEvent, them);
+  }
+
+  /** Open another player's report, such as an opponent's, keeping the viewer's own tag. */
+  function visit(other: string) {
+    const t = cleanTag(other);
+    history.pushState({ visited: true }, "", urlFor(t));
+    start(t, me);
+  }
+
+  /** Back to the previous report, or to the viewer's own when the page opened on someone else. */
+  function back() {
+    if (history.state?.visited) return history.back();
+    history.replaceState(null, "", urlFor(me));
+    start(me);
+  }
+
+  function fromUrl(): boolean {
+    const q = new URLSearchParams(location.search);
+    const t = q.get("tag");
+    if (t) start(t, q.get("vs") ?? undefined);
+    return !!t;
   }
 
   function reset() {
@@ -83,14 +119,20 @@
   }
 
   onMount(() => {
-    const fromUrl = new URLSearchParams(location.search).get("tag");
-    if (fromUrl) start(fromUrl);
-    else input = localStorage.getItem("rook-tag") ?? "";
-    return () => stop?.();
+    if (!fromUrl()) input = localStorage.getItem("rook-tag") ?? "";
+    const popped = () => {
+      if (!fromUrl()) reset();
+    };
+    addEventListener("popstate", popped);
+    return () => {
+      stop?.();
+      removeEventListener("popstate", popped);
+    };
   });
 
   const o = $derived(report?.overview);
-  const tappable = $derived(report?.ai_enabled ? (c: Card) => (picked = c) : undefined);
+  // Card tips and the chat coach the viewer, so they stay on the viewer's own report.
+  const tappable = $derived(report?.ai_enabled && !them ? (c: Card) => (picked = c) : undefined);
   </script>
 
 <main class="sky min-h-svh">
@@ -119,7 +161,7 @@
   {#if report && o}
     {#key report}
       <div class:hidden={view !== "story"}>
-        <Story {report} active={view === "story"} onCard={tappable} onGoal={(label, id) => openChat(label, id)} onAsk={() => openChat()} onReset={reset} />
+        <Story {report} {them} active={view === "story"} onCard={tappable} onGoal={(label, id) => openChat(label, id)} onAsk={() => openChat()} onReset={reset} onPlayer={visit} onBack={back} />
       </div>
       <div class="fixed inset-0 z-10 bg-base-100 overflow-y-auto" class:hidden={view !== "chat"} data-testid="chat">
         <div class="mx-auto max-w-2xl px-6 pt-4 pb-12">

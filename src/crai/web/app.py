@@ -57,7 +57,7 @@ def create_app(
     stream_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
     @app.get("/api/players/{tag}/load")
-    async def load(tag: str, request: Request) -> StreamingResponse:
+    async def load(tag: str, request: Request, them: bool = False) -> StreamingResponse:
         ip = request.client.host if request.client else "unknown"
         if not svc.settings.dev and not svc.loads.allow(ip):
             busy = sse(
@@ -75,7 +75,7 @@ def create_app(
                 refuse(), media_type="text/event-stream", headers=stream_headers
             )
         return StreamingResponse(
-            load_player(svc, tag), media_type="text/event-stream", headers=stream_headers
+            load_player(svc, tag, them), media_type="text/event-stream", headers=stream_headers
         )
 
     @app.get("/api/players/{tag}/questions/{question}")

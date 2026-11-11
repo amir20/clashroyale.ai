@@ -92,7 +92,8 @@ def games(a: Analyzer, tag: str) -> list[Game]:
         f"""SELECT b.id AS battle_id, b.battle_time, b.battle_type, me.result, me.crowns,
                    me.opponent_crowns, me.trophy_change, me.starting_trophies,
                    me.elixir_leaked, me.deck_key,
-                   o.name AS opponent, o.deck_key AS opponent_deck,
+                   o.name AS opponent, o.player_tag AS opponent_tag,
+                   o.deck_key AS opponent_deck,
                    o.starting_trophies AS opponent_trophies
             FROM battle_participants me
             JOIN battles b ON b.id = me.battle_id
@@ -183,6 +184,47 @@ def overview(a: Analyzer, tag: str, items: list[Game] | None = None) -> dict[str
         "net_trophies": sum(known),
         "recent": [g["result"] for g in items[:20]],
     }
+
+
+RECENT_BATTLES = 10
+
+
+def recent_battles(a: Analyzer, items: list[Game], n: int = RECENT_BATTLES) -> list[dict[str, Any]]:
+    """The last few games with who they were against and the deck the opponent brought."""
+    latest = items[:n]
+    if not latest:
+        return []
+    cards = _cards(a)
+    marks = ",".join("?" * len(latest))
+    rows = a.query(
+        f"""SELECT battle_id, player_tag, card_id, evolution_level FROM participant_cards
+            WHERE battle_id IN ({marks}) AND kind = 'deck' ORDER BY battle_id, slot""",
+        tuple(g["battle_id"] for g in latest),
+    ).to_dicts()
+    decks: defaultdict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        if r["card_id"] in cards:
+            card = _played_as(cards[r["card_id"]], r["evolution_level"])
+            decks[(r["battle_id"], r["player_tag"])].append(card)
+    return [
+        {
+            "battle_id": g["battle_id"],
+            "time": g["battle_time"],
+            "type": g["battle_type"],
+            "result": g["result"],
+            "crowns": g["crowns"],
+            "opponent_crowns": g["opponent_crowns"],
+            "trophy_change": g["trophy_change"],
+            "opponent": {
+                "tag": g["opponent_tag"],
+                "name": g["opponent"],
+                "trophies": g["opponent_trophies"],
+                "deck": decks.get((g["battle_id"], g["opponent_tag"]))
+                or [cards[i] for i in _ids(g["opponent_deck"]) if i in cards],
+            },
+        }
+        for g in latest
+    ]
 
 
 def wins_and_losses(items: list[Game]) -> dict[str, Any]:

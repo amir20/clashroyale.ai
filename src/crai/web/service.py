@@ -139,6 +139,7 @@ class Service:
         with laps.lap("overview"):
             overview = insights.overview(a, tag, items)
             patterns = insights.wins_and_losses(items)
+            battles = insights.recent_battles(a, items)
         with laps.lap("similar"):
             similar = insights.similar_battles(a, tag, items) if items else None
         story = self.story(tag, items, laps)
@@ -148,6 +149,7 @@ class Service:
         return {
             "overview": overview,
             "intro": voice.intro(overview),
+            "battles": battles,
             "similar": similar,
             "patterns": patterns,
             "patterns_line": voice.wins_and_losses(patterns),

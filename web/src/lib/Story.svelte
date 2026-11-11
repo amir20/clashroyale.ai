@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cubicOut } from "svelte/easing";
   import { fly } from "svelte/transition";
-  import type { Card, Report } from "./api";
+  import type { Battle, Card, Report } from "./api";
   import CardTile from "./CardTile.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import Rook from "./Rook.svelte";
@@ -10,33 +10,59 @@
   // The first thing a player sees: their games as a few cards to swipe through, no typing needed.
   let {
     report,
+    them = false,
     active,
     onCard,
     onGoal,
     onAsk,
     onReset,
+    onPlayer,
+    onBack,
   }: {
     report: Report;
+    them?: boolean;
     active: boolean;
     onCard?: (card: Card) => void;
     onGoal: (label: string, id: string) => void;
     onAsk: () => void;
     onReset: () => void;
+    onPlayer: (tag: string) => void;
+    onBack?: () => void;
   } = $props();
 
   const o = $derived(report.overview);
   const s = $derived(report.story);
+  // Someone else's report (an opponent's) keeps the facts and drops Rook's advice, which is
+  // written to the viewer about their own games.
   const slides = $derived([
     "you",
-    ...(s.surprises?.length ? ["wow"] : []),
+    ...(s.surprises?.length && !them ? ["wow"] : []),
     ...(o.deck.length ? ["deck"] : []),
+    ...(report.battles?.length ? ["battles"] : []),
     ...(s.trend ? ["trend"] : []),
     ...(s.close ? ["close"] : []),
     ...(s.worst ? ["worst"] : []),
     ...(s.elixir ? ["elixir"] : []),
-    ...(s.replace.enough ? ["try"] : []),
-    "goals",
+    ...(s.replace.enough && !them ? ["try"] : []),
+    ...(them ? [] : ["goals"]),
   ]);
+  const your = $derived(them ? "their" : "your");
+  const Your = $derived(them ? "Their" : "Your");
+  const intro = $derived(
+    them
+      ? o.record.games
+        ? `${o.player.name} won ${o.record.wins} of ${o.record.games} recent games${o.streak.length >= 3 && o.streak.kind !== "draw" ? `, with ${o.streak.length} ${o.streak.kind === "win" ? "wins" : "losses"} in a row` : ""}.`
+        : `${o.player.name} has no recent games I can read.`
+      : report.intro,
+  );
+  const outcome = { win: "Win", loss: "Loss", draw: "Draw" } as const;
+  function ago(iso: string): string {
+    const minutes = Math.max(0, (Date.now() - Date.parse(iso)) / 60000);
+    if (!Number.isFinite(minutes)) return "";
+    if (minutes < 60) return `${Math.max(1, Math.round(minutes))}m ago`;
+    if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h ago`;
+    return `${Math.round(minutes / 60 / 24)}d ago`;
+  }
   const goals: { title: string; detail: string; id: string; label: string; icon: IconName }[] = [
     { title: "Win more", detail: "What's actually costing me games", id: "why_losing", label: "Why do I keep losing?", icon: "trophy" },
     { title: "Find a better deck", detail: "One proven at my trophies", id: "best_deck", label: "What's my best deck?", icon: "cards" },
@@ -62,6 +88,7 @@
     you: "Overview",
     wow: "Surprises",
     deck: "Deck",
+    battles: "Battles",
     trend: "Form",
     close: "Close games",
     worst: "Matchups",
@@ -117,6 +144,25 @@
   </div>
 {/snippet}
 
+{#snippet battle(b: Battle)}
+  <li class="panel p-3" data-testid="battle" data-result={b.result}>
+    <div class="flex items-center gap-2.5">
+      <span class="w-12 shrink-0 text-center rounded-md text-xs font-bold py-1 {b.result === 'win' ? 'bg-success/20 text-success' : b.result === 'loss' ? 'bg-error/20 text-error' : 'bg-base-content/10'}">{outcome[b.result]}</span>
+      <span class="stat-num text-sm shrink-0">{b.crowns ?? "–"}–{b.opponent_crowns ?? "–"}</span>
+      <span class="flex-1 min-w-0 text-sm truncate">
+        vs
+        <button class="link link-primary font-semibold cursor-pointer" onclick={() => onPlayer(b.opponent.tag)} data-testid="opponent">{b.opponent.name || b.opponent.tag}</button>
+      </span>
+      <span class="shrink-0 text-xs text-base-content/60 text-right leading-tight">
+        {#if b.trophy_change}<span class="stat-num {b.trophy_change > 0 ? 'text-success' : 'text-error'}">{b.trophy_change > 0 ? "+" : ""}{b.trophy_change}</span><br />{/if}{ago(b.time)}
+      </span>
+    </div>
+    <div class="grid grid-cols-8 gap-1 mt-2" aria-label={`${b.opponent.name}'s deck`}>
+      {#each b.opponent.deck as c, i (i)}<CardTile card={c} />{/each}
+    </div>
+  </li>
+{/snippet}
+
 {#snippet tile(c: Card, sub?: string, status?: "evolution" | "hero" | "both" | null)}
   {#if onCard}
     <button class="block w-full cursor-pointer transition active:scale-95" aria-label={`More about ${c.name}`} onclick={() => onCard(c)}><CardTile card={c} {sub} {status} /></button>
@@ -132,17 +178,17 @@
               <h2 class="text-3xl mt-1">{o.player.name}</h2>
               <p class="text-sm text-base-content/60">{o.player.clan ?? "No clan"}</p>
             </div>
-            <p class="text-lg leading-snug text-center">{report.intro}</p>
+            <p class="text-lg leading-snug text-center" data-testid="intro">{intro}</p>
             <div class="grid grid-cols-3 divide-x divide-base-content/10 text-center">
               <div><Icon name="trophy" class="w-5 h-5 mx-auto mb-1 text-primary" /><div class="stat-num text-2xl text-primary">{o.player.trophies?.toLocaleString() ?? "—"}</div><div class="text-xs text-base-content/60 mt-1">Trophies</div></div>
               <div><Icon name="crown" class="w-5 h-5 mx-auto mb-1 text-accent" /><div class="stat-num text-2xl">{Math.round(o.record.win_rate * 100)}%</div><div class="text-xs text-base-content/60 mt-1">Won {o.record.wins} of {o.record.games}</div></div>
               <div><Icon name="trend" class="w-5 h-5 mx-auto mb-1 {o.net_trophies >= 0 ? 'text-success' : 'text-error'}" /><div class="stat-num text-2xl" class:text-success={o.net_trophies > 0} class:text-error={o.net_trophies < 0}>{o.net_trophies > 0 ? "+" : ""}{o.net_trophies}</div><div class="text-xs text-base-content/60 mt-1">Trophies gained</div></div>
             </div>
             {#if thin}
-              <p class="text-sm text-center text-base-content/70" data-testid="thin">{o.record.games ? `I've only got ${o.record.games} ${o.record.games === 1 ? "game" : "games"} to go on, so some cards stay hidden until you play more.` : "Play a few games and come back. I'll have plenty to say."}</p>
+              <p class="text-sm text-center text-base-content/70" data-testid="thin">{them ? `Only ${o.record.games} ${o.record.games === 1 ? "game" : "games"} to go on, so there's not much to show yet.` : o.record.games ? `I've only got ${o.record.games} ${o.record.games === 1 ? "game" : "games"} to go on, so some cards stay hidden until you play more.` : "Play a few games and come back. I'll have plenty to say."}</p>
             {/if}
             {#if report.similar?.enough}
-              <p class="text-xs text-center text-base-content/60" data-testid="similar">Compared with {report.similar.battles.toLocaleString()} similar battles from {report.similar.players.toLocaleString()} players{report.similar.near ? " near your trophies" : ""}, last {report.similar.days} days.</p>
+              <p class="text-xs text-center text-base-content/60" data-testid="similar">Compared with {report.similar.battles.toLocaleString()} similar battles from {report.similar.players.toLocaleString()} players{report.similar.near ? ` near ${your} trophies` : ""}, last {report.similar.days} days.</p>
             {/if}
           {:else if id === "wow"}
             <h2 class="text-2xl lg:text-3xl flex items-center gap-2"><Icon name="sparkle" class="w-6 h-6 text-primary" />Things you didn't know</h2>
@@ -200,27 +246,33 @@
               {/each}
             </ul>
           {:else if id === "deck"}
-            <h2 class="text-2xl lg:text-3xl">Your deck</h2>
+            <h2 class="text-2xl lg:text-3xl">{them ? `${o.player.name}'s deck` : "Your deck"}</h2>
             <div class="grid grid-cols-4 gap-x-3 gap-y-4">
               {#each o.deck as c (c.id)}{@render tile(c, c.name, c.status)}{/each}
             </div>
             <p class="text-sm text-base-content/70">{onCard ? `${wide ? "Click" : "Tap"} any card to find out more.` : `${o.avg_elixir} average elixir.`}</p>
+          {:else if id === "battles"}
+            <h2 class="text-2xl lg:text-3xl">Recent battles</h2>
+            <ul class="grid gap-2.5" data-testid="battles">
+              {#each report.battles as b (b.battle_id)}{@render battle(b)}{/each}
+            </ul>
+            <p class="text-sm text-base-content/70">{wide ? "Click" : "Tap"} an opponent to see their games.</p>
           {:else if id === "trend" && s.trend}
-            <h2 class="text-2xl lg:text-3xl">Your form</h2>
-            {@render says(s.lines.trend ?? "")}
-            <Visual visual={s.trend} {onCard} />
+            <h2 class="text-2xl lg:text-3xl">{Your} form</h2>
+            {#if !them}{@render says(s.lines.trend ?? "")}{/if}
+            <Visual visual={s.trend} {onCard} {them} />
           {:else if id === "close" && s.close}
             <h2 class="text-2xl lg:text-3xl">Close games</h2>
-            {@render says(s.lines.close ?? "")}
-            <Visual visual={s.close} />
+            {#if !them}{@render says(s.lines.close ?? "")}{/if}
+            <Visual visual={s.close} {them} />
           {:else if id === "worst" && s.worst}
-            <h2 class="text-2xl lg:text-3xl">What beats you</h2>
-            {@render says(s.lines.worst ?? "")}
-            <Visual visual={s.worst} {onCard} titled={false} />
+            <h2 class="text-2xl lg:text-3xl">What beats {them ? "them" : "you"}</h2>
+            {#if !them}{@render says(s.lines.worst ?? "")}{/if}
+            <Visual visual={s.worst} {onCard} titled={false} {them} />
           {:else if id === "elixir" && s.elixir}
-            <h2 class="text-2xl lg:text-3xl">What your deck costs</h2>
-            {@render says(s.lines.elixir ?? "")}
-            <Visual visual={s.elixir} />
+            <h2 class="text-2xl lg:text-3xl">What {your} deck costs</h2>
+            {#if !them}{@render says(s.lines.elixir ?? "")}{/if}
+            <Visual visual={s.elixir} {them} />
           {:else if id === "try"}
             {@const weak = s.replace.weakest}
             {@const swap = s.replace.candidates[0]}
@@ -272,7 +324,11 @@
             <button class="btn btn-ghost btn-sm font-medium cursor-pointer" onclick={() => document.getElementById(`section-${i}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{sectionNames[group[0]]}</button>
           {/each}
         </nav>
-        <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onReset}>Not you?</button>
+        {#if them}
+          <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onBack} data-testid="back">← Back</button>
+        {:else}
+          <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onReset}>Not you?</button>
+        {/if}
       </div>
     </header>
     <div class="mx-auto max-w-6xl px-8">
@@ -288,14 +344,18 @@
 {:else}
 <div class="fixed inset-0 z-20 bg-base-100 flex flex-col" in:fly={{ y: 700, duration: 420, easing: cubicOut }} data-testid="story">
   <div class="mx-auto w-full max-w-md flex flex-col flex-1 min-h-0 px-5 pt-[max(0.75rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]">
-    <div class="flex gap-1" role="progressbar" aria-label="Your story" aria-valuemin="1" aria-valuemax={slides.length} aria-valuenow={index + 1}>
+    <div class="flex gap-1" role="progressbar" aria-label={`${Your} story`} aria-valuemin="1" aria-valuemax={slides.length} aria-valuenow={index + 1}>
       {#each slides as id, i (id)}
         <span class="flex-1 h-1 rounded-full transition-colors {i <= index ? 'bg-primary' : 'bg-base-content/15'}"></span>
       {/each}
     </div>
     <div class="flex justify-between items-center mt-2 h-6">
       <button class="text-xs text-base-content/60 cursor-pointer disabled:invisible" disabled={index === 0} onclick={() => go(0)} data-testid="start-over">↺ Start over</button>
-      <button class="text-xs text-base-content/60 cursor-pointer" onclick={onReset} data-testid="not-you">Not you?</button>
+      {#if them}
+        <button class="text-xs text-base-content/60 cursor-pointer" onclick={onBack} data-testid="back">← Back</button>
+      {:else}
+        <button class="text-xs text-base-content/60 cursor-pointer" onclick={onReset} data-testid="not-you">Not you?</button>
+      {/if}
     </div>
 
     <!-- svelte-ignore a11y_no_static_element_interactions -->

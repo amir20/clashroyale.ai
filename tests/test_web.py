@@ -428,3 +428,23 @@ def test_loading_says_what_it_is_working_on(db_path: Path) -> None:
     assert progress == sorted(progress)  # the bar only moves forward
     shown = {e["message"] for e in status}
     assert voice.REPORT_STEPS["similar"][1] in shown
+
+
+def test_report_lists_recent_battles_with_opponents(db_path: Path) -> None:
+    with client(db_path) as c:
+        report = events(c.get(f"/api/players/{ME[1:]}/load").text)[-1]["report"]
+    battles = report["battles"]
+    assert 0 < len(battles) <= insights.RECENT_BATTLES
+    assert [b["time"] for b in battles] == sorted((b["time"] for b in battles), reverse=True)
+    for b in battles:
+        assert b["result"] in {"win", "loss", "draw"}
+        assert b["opponent"]["tag"].startswith("#") and b["opponent"]["tag"] != ME
+        assert len(b["opponent"]["deck"]) == 8
+
+
+def test_looking_up_someone_else_talks_about_them(db_path: Path) -> None:
+    with client(db_path) as c:
+        out = events(c.get(f"/api/players/{NEW[1:]}/load?them=true").text)
+    lines = [e["message"] for e in out if e["type"] == "status"]
+    assert out[-1]["type"] == "ready"
+    assert not any(" you" in m.lower() or "your" in m.lower() for m in lines), lines

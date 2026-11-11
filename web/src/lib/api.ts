@@ -1,4 +1,15 @@
 export type Card = { id: number; name: string; elixir: number | null; rarity: string | null; icon: string | null };
+export type PlayedCard = Card & { status?: "evolution" | "hero" | "both" | null };
+export type Battle = {
+  battle_id: number;
+  time: string;
+  type: string | null;
+  result: "win" | "loss" | "draw";
+  crowns: number | null;
+  opponent_crowns: number | null;
+  trophy_change: number | null;
+  opponent: { tag: string; name: string | null; trophies: number | null; deck: PlayedCard[] };
+};
 export type Report = {
   overview: {
     player: { tag: string; name: string; trophies: number | null; clan: string | null; arena: string | null };
@@ -10,6 +21,7 @@ export type Report = {
     recent: string[];
   };
   intro: string;
+  battles: Battle[];
   similar: { battles: number; players: number; days: number; enough: boolean; near: boolean } | null;
   patterns: {
     close_games: { games: number; wins: number; losses: number };
@@ -51,8 +63,9 @@ export type LoadEvent =
 
 export const cleanTag = (t: string) => t.trim().toUpperCase().replace(/^#/, "").replace(/O/g, "0");
 
-export function loadPlayer(tag: string, onEvent: (e: LoadEvent) => void): () => void {
-  const source = new EventSource(`/api/players/${encodeURIComponent(tag)}/load`);
+/** Stream a player's report. `them` is for looking up someone else, such as an opponent. */
+export function loadPlayer(tag: string, onEvent: (e: LoadEvent) => void, them = false): () => void {
+  const source = new EventSource(`/api/players/${encodeURIComponent(tag)}/load${them ? "?them=true" : ""}`);
   let finished = false;
   source.onmessage = (m) => {
     const event = JSON.parse(m.data) as LoadEvent;

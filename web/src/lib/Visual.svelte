@@ -3,7 +3,11 @@
   import Icon from "./Icon.svelte";
 
   // Drawn from figures the server computed; the model only chooses which visual to show.
-  let { visual: v, onCard, titled = true }: { visual: any; onCard?: (card: any) => void; titled?: boolean } = $props();
+  // `them` words it about someone else, such as an opponent, instead of the viewer.
+  let { visual: v, onCard, titled = true, them = false }: { visual: any; onCard?: (card: any) => void; titled?: boolean; them?: boolean } = $props();
+  const your = $derived(them ? "their" : "your");
+  const Your = $derived(them ? "Their" : "Your");
+  const you = $derived(them ? "they" : "you");
   const pct = (x: number | null | undefined) => (x == null ? "—" : `${Math.round(x * 100)}%`);
   const pct1 = (x: number | null | undefined) => (x == null ? "—" : `${(x * 100).toFixed(1)}%`);
   const gain = (x: number) => `${x > 0 ? "+" : ""}${(x * 100).toFixed(1)}`;
@@ -35,7 +39,7 @@
 
 {#snippet legend()}
   <p class="flex items-center gap-3 text-xs text-base-content/60" data-testid="compare-legend">
-    <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-3 rounded-sm bg-base-content/25"></span>In your deck now</span>
+    <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-3 rounded-sm bg-base-content/25"></span>In {your} deck now</span>
     <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-3 rounded-sm bg-primary"></span>Different</span>
   </p>
 {/snippet}
@@ -113,7 +117,7 @@
     <p class="text-xs text-center text-base-content/60 mt-0.5">{nearYou(v.scope) ? "Proven by players at your trophies this week" : "Proven across all players this week"}</p>
     <a class="btn btn-primary btn-sm w-full max-w-xs mx-auto flex mt-3 cursor-pointer" href={v.copy_url} target="_blank" rel="noreferrer">Copy to game</a>
   {:else if v.type === "worst_matchups"}
-    {#if titled}<h4 class="text-sm font-semibold mb-3">What beats you most</h4>{/if}
+    {#if titled}<h4 class="text-sm font-semibold mb-3">What beats {them ? "them" : "you"} most</h4>{/if}
     <ul class="space-y-3">
       {#each v.rows as c (c.id)}
         <li class="flex items-center gap-3" class:opacity-55={!c.real}>
@@ -131,23 +135,23 @@
         </li>
       {/each}
     </ul>
-    <p class="text-xs text-base-content/60 mt-3">Games where your opponent had each card. You win {pct(v.overall_win_rate)} overall.{v.rows.some((c: any) => !c.real) ? " Faded cards: too few games to be sure." : ""}</p>
+    <p class="text-xs text-base-content/60 mt-3">Games where {your} opponent had each card. {them ? "They win" : "You win"} {pct(v.overall_win_rate)} overall.{v.rows.some((c: any) => !c.real) ? " Faded cards: too few games to be sure." : ""}</p>
   {:else if v.type === "trend"}
     {#if v.verdict === "changed_decks"}
-      <h4 class="text-sm font-semibold">Decks you've played, oldest first</h4>
+      <h4 class="text-sm font-semibold">Decks {you}'ve played, oldest first</h4>
       <div class="mt-1 mb-3">{@render legend()}</div>
       <ul class="space-y-3 lg:space-y-6">
         {#each v.decks as d, i (i)}
           <li>
             <div class="flex items-center justify-between gap-3 text-sm mb-1.5">
               {#if d.current}
-                <span class="font-semibold text-primary">Your deck now</span>
+                <span class="font-semibold text-primary">{Your} deck now</span>
               {:else}
                 <span class="text-base-content/70">{d.added.length} {d.added.length === 1 ? "card" : "cards"} different</span>
               {/if}
               <span class="stat-num shrink-0">{d.wins}–{d.losses}</span>
             </div>
-            <div class="grid grid-cols-8 gap-1" data-testid="deck-compare" aria-label={d.current ? "Your deck now" : `${names(d.added)} instead of ${names(d.removed)}`}>
+            <div class="grid grid-cols-8 gap-1" data-testid="deck-compare" aria-label={d.current ? `${Your} deck now` : `${names(d.added)} instead of ${names(d.removed)}`}>
               {#each d.cards as c (c.id)}{@render tile(c, !d.current && c.yours)}{/each}
             </div>
             {#if !d.current && d.added.length <= 2}
@@ -195,7 +199,7 @@
     {/if}
   {:else if v.type === "close_games"}
     {@const c = v.close_games}
-    <div class="text-xs text-base-content/60 flex items-center gap-1"><Icon name="crown" class="w-3.5 h-3.5 text-primary" />Your one-crown games</div>
+    <div class="text-xs text-base-content/60 flex items-center gap-1"><Icon name="crown" class="w-3.5 h-3.5 text-primary" />{Your} one-crown games</div>
     <div class="stat-num text-2xl mt-0.5">Won {c.wins} of {c.games}</div>
     <div class="flex h-2 gap-0.5 mt-2 rounded-full overflow-hidden" aria-hidden="true">
       {#if c.wins}<div class="bg-success" style="width: {(c.wins / c.games) * 100}%"></div>{/if}
@@ -204,14 +208,14 @@
     <div class="grid grid-cols-2 gap-3 mt-4 text-center">
       <div>
         <div class="stat-num text-lg flex items-center justify-center gap-1"><Icon name="elixir" class="w-4 h-4 text-fuchsia-400" />{v.elixir_leaked_close_wins?.toFixed(1) ?? "—"}</div>
-        <div class="text-xs text-base-content/60">Elixir wasted when you win them</div>
+        <div class="text-xs text-base-content/60">Elixir wasted when {you} win them</div>
       </div>
       <div>
         <div class="stat-num text-lg flex items-center justify-center gap-1"><Icon name="elixir" class="w-4 h-4 text-fuchsia-400" />{v.elixir_leaked_close_losses?.toFixed(1) ?? "—"}</div>
-        <div class="text-xs text-base-content/60">Elixir wasted when you lose them</div>
+        <div class="text-xs text-base-content/60">Elixir wasted when {you} lose them</div>
       </div>
     </div>
-    <p class="text-xs text-base-content/60 mt-3">Typical game. For comparison, {v.elixir_leaked_three_crowned?.toFixed(1) ?? "—"} when you get three-crowned.</p>
+    <p class="text-xs text-base-content/60 mt-3">Typical game. For comparison, {v.elixir_leaked_three_crowned?.toFixed(1) ?? "—"} when {you} get three-crowned.</p>
   {:else if v.type === "elixir"}
     <div class="stat-num text-2xl flex items-center gap-1.5"><Icon name="elixir" class="w-6 h-6 text-fuchsia-400" />{v.avg_elixir} elixir</div>
     <div class="text-xs text-base-content/60 mt-0.5">
@@ -224,7 +228,7 @@
           <div class="flex-1 h-2 rounded-full bg-base-content/10 overflow-hidden" aria-hidden="true">
             <div class="h-full rounded-full {b.yours ? 'bg-primary' : 'bg-base-content/30'}" style="width: {b.win_rate * 100}%"></div>
           </div>
-          <span class="w-20 shrink-0 text-right tabular-nums {b.yours ? 'font-semibold' : ''}">{pct1(b.win_rate)}{b.yours ? " yours" : ""}</span>
+          <span class="w-20 shrink-0 text-right tabular-nums {b.yours ? 'font-semibold' : ''}">{pct1(b.win_rate)}{b.yours ? (them ? " theirs" : " yours") : ""}</span>
         </li>
       {/each}
     </ul>

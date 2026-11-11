@@ -374,6 +374,15 @@ WAKING_LINES = (
     "It's only this slow right after a restart…",
 )
 
+# The same loading screen when looking someone else up, such as an opponent.
+SCOUT_LINES = (
+    "Sharpening my beak…",
+    "Going through their replays…",
+    "Counting their crowns…",
+    "Asking around about them…",
+    "Comparing them to everyone else…",
+)
+
 # What the loading screen says as each part of the report starts, and how far along it is.
 REPORT_STEPS = {
     "data": (76, "Catching up on the latest battles…"),
@@ -385,6 +394,16 @@ REPORT_STEPS = {
     "elixir": (90, "Comparing your elixir cost…"),
     "replace": (92, "Picking a card worth swapping…"),
     "surprises": (94, "Looking for things you didn't know…"),
+}
+SCOUT_STEPS = REPORT_STEPS | {
+    "games": (78, "Reading their games…"),
+    "overview": (80, "Adding up their record…"),
+    "similar": (82, "Finding players with decks like theirs…"),
+    "trend": (86, "Checking how they're trending…"),
+    "worst": (88, "Finding the cards that beat them…"),
+    "elixir": (90, "Comparing their elixir cost…"),
+    "replace": (92, "Crunching the last numbers…"),
+    "surprises": (94, "Almost there…"),
 }
 
 
