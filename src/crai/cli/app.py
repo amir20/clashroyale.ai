@@ -65,16 +65,15 @@ def _main(
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable JSON output")] = False,
 ) -> None:
     _state["json"] = as_json
-    handler: logging.Handler = (
-        logging.StreamHandler(sys.stderr)
-        if as_json
-        else RichHandler(console=ui.console, show_path=False, log_time_format="%H:%M:%S")
-    )
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(message)s",
-        handlers=[handler],
-    )
+    handler: logging.Handler
+    if as_json or not ui.console.is_terminal:
+        # Plain lines for JSON mode and for servers (Docker logs): Rich wraps at 80 columns
+        # when there's no terminal, which splits every long line.
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    else:
+        handler = RichHandler(console=ui.console, show_path=False, log_time_format="%H:%M:%S")
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=[handler])
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if ctx.invoked_subcommand not in {"upgrade-db", "mcp"}:
         _refuse_legacy()
