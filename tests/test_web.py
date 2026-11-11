@@ -397,14 +397,20 @@ async def test_waking_server_says_so_instead_of_looking_stuck(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(loading, "HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(loading, "WARM_UP_SECONDS", 0.1)
     settings = Settings(("t",), "https://api.test/v1", db_path, None, None)
     svc = create_app(settings, httpx.MockTransport(game)).state.service
     svc.warming = asyncio.get_running_loop().create_future()
     asyncio.get_running_loop().call_later(0.1, svc.warming.set_result, None)
     out = [json.loads(e[5:]) async for e in loading.load_player(svc, ME[1:])]
-    wake = [e["message"] for e in out if e.get("step") == "wake"]
-    assert wake[0] == voice.WAKING_UP
-    assert set(wake[1:]) <= set(voice.WAKING_LINES) and len(wake) > 1
+    wake = [e for e in out if e.get("step") == "wake"]
+    assert wake[0]["message"] == voice.WAKING_UP
+    assert {e["message"] for e in wake} <= {voice.WAKING_UP, *voice.WAKING_LINES}
+    assert len(wake) > 3 and voice.WAKING_LINES[0] in {e["message"] for e in wake}
+    bar = [e["progress"] for e in wake]
+    assert bar == sorted(bar) and bar[-1] > bar[0]  # the bar keeps moving while it waits
+    whole = [e["progress"] for e in out if "progress" in e]
+    assert whole == sorted(whole)  # and never jumps back afterwards
     steps = [e.get("step") for e in out]
     assert steps.index("wake") < steps.index("store")  # waits before the snapshot is touched
     assert out[-1]["type"] == "ready"

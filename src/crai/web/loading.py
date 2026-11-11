@@ -14,6 +14,8 @@ from crai.web.service import FRESH_SECONDS, HEARTBEAT_SECONDS, Service
 
 log = logging.getLogger(__name__)
 
+WARM_UP_SECONDS = 25  # about how long the NAS takes to load everyone's battles
+
 
 def sse(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event, default=str)}\n\n"
@@ -55,12 +57,31 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
     outcome = "cancelled"  # until it finishes one way or another
 
     async def wake() -> None:
-        """Wait out the startup warm-up, if it's still running, in Rook's just-woke-up voice."""
-        if svc.warming is None or svc.warming.done():
+        """Wait out the startup warm-up, if it's still running, saying so plainly.
+
+        The bar creeps forward over the usual warm-up time, and the line changes every few
+        seconds (slow enough to read) instead of on every heartbeat.
+        """
+        warming = svc.warming
+        if warming is None or warming.done():
             return
+        started = time.monotonic()
         with laps.lap("wake"):
-            await emit({"type": "status", "step": "wake", "message": voice.WAKING_UP})
-            await with_heartbeat(asyncio.shield(svc.warming), emit, "wake", -1, voice.WAKING_LINES)
+            message, beats = voice.WAKING_UP, 0
+            while True:
+                elapsed = time.monotonic() - started
+                progress = 25 + round(
+                    20 * min(1.0, elapsed / WARM_UP_SECONDS)
+                )  # up to the next step's 48
+                await emit(
+                    {"type": "status", "step": "wake", "progress": progress, "message": message}
+                )
+                done, _ = await asyncio.wait({warming}, timeout=HEARTBEAT_SECONDS)
+                if done:
+                    return
+                beats += 1
+                if beats % 3 == 0:
+                    message = voice.WAKING_LINES[(beats // 3 - 1) % len(voice.WAKING_LINES)]
 
     async def run() -> None:
         nonlocal outcome

@@ -370,8 +370,8 @@ LOADING_LINES = (
 WAKING_UP = "I just restarted, so I'm loading everyone's battles first. About 20 seconds…"
 WAKING_LINES = (
     "Still loading everyone's battles…",
-    "Millions of battles. Almost there…",
-    "Nearly awake. Your deck is next…",
+    "Millions of battles to read. Hang on…",
+    "It's only this slow right after a restart…",
 )
 
 # What the loading screen says as each part of the report starts, and how far along it is.
