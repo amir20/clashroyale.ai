@@ -94,6 +94,7 @@ class Service:
         self.usage = Usage(settings.db_path.with_name("app.db"))
         self.fetched_at: dict[str, float] = {}
         self.loads = RateLimiter(LOADS_PER_MINUTE, 60)
+        self.warming: asyncio.Future[None] | None = None  # the startup warm-up, while it runs
 
     def client(self) -> ClashClient:
         return ClashClient(

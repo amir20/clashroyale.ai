@@ -367,6 +367,16 @@ LOADING_LINES = (
 )
 
 
+WAKING_UP = "I just woke up. Give me a few seconds to stretch…"
+WAKING_LINES = (
+    "Stretching my wings…",
+    "Finding my glasses. And everyone's battles.",
+    "Remembering every deck ever played. Almost there.",
+    "Coffee first. Then your deck.",
+    "Still waking up. It's a lot of battles.",
+)
+
+
 def _tip_against(card: dict[str, Any]) -> str:
     """Rook's opinion on playing into a card, by what kind of card it is (from its id)."""
     kind = str(card["id"])[:2]

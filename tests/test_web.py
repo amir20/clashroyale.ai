@@ -1,5 +1,6 @@
 """The web API with fake game and OpenRouter servers: no network."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -12,11 +13,11 @@ from fastapi.testclient import TestClient
 
 from crai.analysis import insights, visuals
 from crai.analysis.analytics import Analyzer
-from crai.coach import agent, prompts
+from crai.coach import agent, prompts, voice
 from crai.coach.agent import _finished_text
 from crai.coach.tools import player_tools
 from crai.config import Settings
-from crai.web import create_app
+from crai.web import create_app, loading
 from crai.web.service import DAILY_QUESTIONS, LOADS_PER_MINUTE
 
 NEW = "#Q9Q"
@@ -390,3 +391,20 @@ def test_ai_calls_are_logged(db_path: Path, caplog: pytest.LogCaptureFixture) ->
     assert "tools=get_overview" in line
     assert "cost=$0.00040" in line
     assert "How am I doing?" in line
+
+
+async def test_waking_server_says_so_instead_of_looking_stuck(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(loading, "HEARTBEAT_SECONDS", 0.01)
+    settings = Settings(("t",), "https://api.test/v1", db_path, None, None)
+    svc = create_app(settings, httpx.MockTransport(game)).state.service
+    svc.warming = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_later(0.1, svc.warming.set_result, None)
+    out = [json.loads(e[5:]) async for e in loading.load_player(svc, ME[1:])]
+    wake = [e["message"] for e in out if e.get("step") == "wake"]
+    assert wake[0] == voice.WAKING_UP
+    assert set(wake[1:]) <= set(voice.WAKING_LINES) and len(wake) > 1
+    steps = [e.get("step") for e in out]
+    assert steps.index("wake") < steps.index("store")  # waits before the snapshot is touched
+    assert out[-1]["type"] == "ready"

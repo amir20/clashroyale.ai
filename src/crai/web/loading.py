@@ -20,7 +20,11 @@ def sse(event: dict[str, Any]) -> str:
 
 
 async def with_heartbeat[T](
-    work: Awaitable[T], emit: Callable[[dict[str, Any]], Awaitable[None]], step: str, seed: int
+    work: Awaitable[T],
+    emit: Callable[[dict[str, Any]], Awaitable[None]],
+    step: str,
+    seed: int,
+    lines: tuple[str, ...] = voice.LOADING_LINES,
 ) -> T:
     """Await `work`, emitting a fresh status line whenever it takes a while."""
     task = asyncio.ensure_future(work)
@@ -34,7 +38,7 @@ async def with_heartbeat[T](
             {
                 "type": "status",
                 "step": step,
-                "message": voice.LOADING_LINES[i % len(voice.LOADING_LINES)],
+                "message": lines[i % len(lines)],
             }
         )
 
@@ -47,6 +51,14 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
 
     laps = Laps()
     outcome = "cancelled"  # until it finishes one way or another
+
+    async def wake() -> None:
+        """Wait out the startup warm-up, if it's still running, in Rook's just-woke-up voice."""
+        if svc.warming is None or svc.warming.done():
+            return
+        with laps.lap("wake"):
+            await emit({"type": "status", "step": "wake", "message": voice.WAKING_UP})
+            await with_heartbeat(asyncio.shield(svc.warming), emit, "wake", -1, voice.WAKING_LINES)
 
     async def run() -> None:
         nonlocal outcome
@@ -101,6 +113,7 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                         }
                     )
                     return
+                await wake()  # the warm-up holds the snapshot while it reads it
                 await emit(
                     {
                         "type": "status",
@@ -119,6 +132,7 @@ async def load_player(svc: Service, raw_tag: str) -> AsyncIterator[str]:
                 finally:
                     svc.lock.release()
                 svc.fetched_at[tag] = time.monotonic()
+            await wake()
             await emit(
                 {
                     "type": "status",

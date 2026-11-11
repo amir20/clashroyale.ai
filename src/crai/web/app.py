@@ -49,7 +49,7 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         # Warm the analytics cache so the first visitor isn't the one who waits for it.
         if svc.settings.db_path.exists():
-            app.state.warm = asyncio.create_task(asyncio.to_thread(warm_up))
+            svc.warming = asyncio.ensure_future(asyncio.to_thread(warm_up))
         yield
 
     app = FastAPI(title="Rook", lifespan=lifespan)
