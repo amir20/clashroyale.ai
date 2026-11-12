@@ -239,9 +239,12 @@ def shared_cards(ids: Sequence[int]) -> pl.Expr:
 
 
 class Analyzer:
-    def __init__(self, db_path: Path | str, window_days: int = 0) -> None:
+    def __init__(self, db_path: Path | str, window_days: int = 0, follow: bool = True) -> None:
         self.db_path = Path(db_path)
         self.window_days = window_days  # 0 = load every battle in the snapshot
+        # Pick up new battles on every read. The web server turns this off and calls `refresh`
+        # itself, so a report never stalls absorbing a crawl and its table can't change midway.
+        self.follow = follow
         self._cache: dict[Hashable, Any] = {}
         self._field: dict[Hashable, tuple[float, Any]] = {}  # see _field_cached
         self._refreshing: set[Hashable] = set()
@@ -255,14 +258,33 @@ class Analyzer:
     # ------------------------------------------------------------ plumbing
 
     def _base(self) -> pl.DataFrame:
-        """All deck appearances from the Parquet snapshot (synced first), with `is_top`.
+        """All deck appearances from the Parquet snapshot (synced first unless `follow` is off),
+        with `is_top`.
 
         Loaded once. After that, new battles are appended and the seed flag is updated in
         place: reloading tens of millions of rows takes ~20 s on a small server.
         """
+        if self.follow or self._base_df is None:
+            self.refresh()
+        assert self._base_df is not None
+        return self._base_df
+
+    def behind(self) -> int:
+        """How many battles the database has that the loaded table doesn't (an upper bound)."""
+        latest = self.scalar("SELECT coalesce(max(rowid), 0) FROM battles") or 0
+        return max(0, latest - self._covered)
+
+    def refresh(self, wait: bool = True) -> bool:
+        """Bring the table up to date with the database: sync the snapshot, then load or append.
+
+        Readers in other threads keep using the table they already have until this swaps in the
+        new one. With `wait` off, gives up (returning False) if another refresh is running.
+        """
         if not self.db_path.exists():
             raise FileNotFoundError(f"No database at {self.db_path}. Run `crai crawl` first.")
-        with self._load_lock:
+        if not self._load_lock.acquire(blocking=wait):
+            return False
+        try:
             snapshot.sync(self.db_path)
             with self.session() as conn:
                 rows = conn.execute("SELECT tag FROM players WHERE is_seed = 1")
@@ -274,8 +296,9 @@ class Analyzer:
                 self._append(seeds)
             if self.window_days and time.monotonic() - self._trimmed_at > TRIM_SECONDS:
                 self._trim()
-            assert self._base_df is not None
-            return self._base_df
+        finally:
+            self._load_lock.release()
+        return True
 
     def _prepare(self, seeds: frozenset[str]) -> Callable[[pl.LazyFrame], pl.LazyFrame]:
         """Shape the rows as they're read. Repeated strings become categories and floats shrink:
@@ -326,7 +349,9 @@ class Analyzer:
         # Filtered copies grow by the same rows instead of filtering everything again. Field-wide
         # stats in `_field` stay: a few hundred battles don't move them.
         self._cache = {
-            k: grow(v, self._filter(new, k[1])) for k, v in self._cache.items() if _is_decks(k)
+            k: grow(v, self._filter(new, k[1]))
+            for k, v in list(self._cache.items())  # a report thread may be adding entries
+            if _is_decks(k)
         }
         self._covered, self._seeds = covered, seeds
         log.info(
@@ -343,7 +368,9 @@ class Analyzer:
         keep = pl.col("battle_time") >= snapshot.cutoff(self.window_days)
         before = self._base_df.height
         self._base_df = self._base_df.filter(keep).rechunk()
-        self._cache = {k: v.filter(keep).rechunk() for k, v in self._cache.items() if _is_decks(k)}
+        self._cache = {
+            k: v.filter(keep).rechunk() for k, v in list(self._cache.items()) if _is_decks(k)
+        }
         self._trimmed_at = time.monotonic()
         log.info(
             "analytics: dropped %d deck rows older than %d days in %.2fs",
@@ -390,7 +417,8 @@ class Analyzer:
 
     def _remember(self, key: Hashable, value: Any) -> None:
         if len(self._field) >= MAX_FIELD_ENTRIES:  # drop the oldest
-            del self._field[min(self._field, key=lambda k: self._field[k][0])]
+            oldest = min(list(self._field.items()), key=lambda kv: kv[1][0])[0]
+            self._field.pop(oldest, None)
         self._field[key] = (time.monotonic(), value)
 
     def session(self) -> AbstractContextManager[sqlite3.Connection]:

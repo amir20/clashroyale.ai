@@ -18,7 +18,7 @@ from crai.coach.agent import _finished_text
 from crai.coach.tools import player_tools
 from crai.config import Settings
 from crai.web import create_app, loading
-from crai.web.service import DAILY_QUESTIONS, LOADS_PER_MINUTE
+from crai.web.service import DAILY_QUESTIONS, INLINE_BATTLES, LOADS_PER_MINUTE
 
 NEW = "#Q9Q"
 
@@ -448,3 +448,24 @@ def test_looking_up_someone_else_talks_about_them(db_path: Path) -> None:
     lines = [e["message"] for e in out if e["type"] == "status"]
     assert out[-1]["type"] == "ready"
     assert not any(" you" in m.lower() or "your" in m.lower() for m in lines), lines
+
+
+def test_report_leaves_a_crawl_sized_backlog_to_the_refresher(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with client(db_path) as c:
+        svc = c.app.state.service  # ty: ignore[unresolved-attribute]
+        svc.analyzer.decks()  # loaded
+        held = svc.analyzer._base_df
+        monkeypatch.setattr(svc.analyzer, "behind", lambda: INLINE_BATTLES + 1)
+        svc.report(ME)
+        assert svc.analyzer._base_df is held  # the report used the table it had
+        assert svc.wants_refresh  # and asked the refresher to catch up
+
+        monkeypatch.setattr(svc.analyzer, "behind", lambda: 5)
+        calls: list[bool] = []
+        monkeypatch.setattr(svc.analyzer, "refresh", lambda wait=True: calls.append(wait) or True)
+        svc.wants_refresh = False
+        svc.report(ME)
+        assert calls == [False]  # a few battles: picked up inline, never waiting on a refresh
+        assert not svc.wants_refresh

@@ -17,7 +17,13 @@ from crai.coach.agent import Ask, SuggestRequest, ask_coach, suggest_questions
 from crai.collect.client import normalize_tag
 from crai.config import PROJECT_ROOT, Settings, get_settings
 from crai.web.loading import load_player, sse
-from crai.web.service import DAILY_QUESTIONS, QuestionId, Service
+from crai.web.service import (
+    DAILY_QUESTIONS,
+    REFRESH_POLL_SECONDS,
+    REFRESH_SECONDS,
+    QuestionId,
+    Service,
+)
 
 DAILY_SUGGESTIONS = 40
 
@@ -45,12 +51,36 @@ def create_app(
             return
         log.info("warm-up done in %.2fs", time.monotonic() - started)
 
+    async def refresher() -> None:
+        """Absorb the crawler's battles in the background, between reports.
+
+        It waits for a quiet moment (no report or question running) so it doesn't fight a
+        visitor for the NAS's CPU and memory. Reports keep the table they started with.
+        """
+        if svc.warming is not None:
+            await asyncio.wait({svc.warming})
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(REFRESH_POLL_SECONDS)
+            due = svc.wants_refresh or time.monotonic() - last > REFRESH_SECONDS
+            if not due or svc.lock.locked():
+                continue
+            last = time.monotonic()
+            try:
+                await asyncio.to_thread(svc.refresh)
+            except Exception:
+                log.exception("background refresh failed")
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         # Warm the analytics cache so the first visitor isn't the one who waits for it.
+        task = None
         if svc.settings.db_path.exists():
             svc.warming = asyncio.ensure_future(asyncio.to_thread(warm_up))
+            task = asyncio.create_task(refresher())
         yield
+        if task:
+            task.cancel()
 
     app = FastAPI(title="Rook", lifespan=lifespan)
     app.state.service = svc

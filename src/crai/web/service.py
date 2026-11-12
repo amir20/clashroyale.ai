@@ -19,7 +19,6 @@ from crai.coach import voice
 from crai.collect.client import ClashClient
 from crai.config import Settings
 from crai.storage import database as db
-from crai.storage import snapshot
 from crai.timing import Laps
 
 log = logging.getLogger(__name__)
@@ -28,6 +27,12 @@ FRESH_SECONDS = 600
 DAILY_QUESTIONS = 5
 HEARTBEAT_SECONDS = 1.6
 LOADS_PER_MINUTE = 20
+# A report picks up new battles itself only when there are this few (someone's own battlelog).
+# More means the crawler just ran: absorbing millions of rows takes the NAS ~30 s, so the
+# background refresher does it while reports use the table they have.
+INLINE_BATTLES = 2_000
+REFRESH_SECONDS = 300  # how often the background refresher catches up with the crawler
+REFRESH_POLL_SECONDS = 5
 QUESTIONS = {
     "why_losing": "Why do I keep losing?",
     "replace_card": "Which card should I replace?",
@@ -90,12 +95,13 @@ class Service:
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None) -> None:
         self.settings = settings
         self.transport = transport
-        self.analyzer = Analyzer(settings.db_path, settings.analytics_days)
+        self.analyzer = Analyzer(settings.db_path, settings.analytics_days, follow=False)
         self.lock = asyncio.Lock()  # one writer and one analytics load at a time
         self.usage = Usage(settings.db_path.with_name("app.db"))
         self.fetched_at: dict[str, float] = {}
         self.loads = RateLimiter(LOADS_PER_MINUTE, 60)
         self.warming: asyncio.Future[None] | None = None  # the startup warm-up, while it runs
+        self.wants_refresh = False  # a report saw the crawler ahead; refresh soon
 
     def client(self) -> ClashClient:
         return ClashClient(
@@ -124,16 +130,35 @@ class Service:
             new = db.ingest_battlelog(conn, battles)
             db.mark_battlelog_fetched(conn, tag)
             db.track_player(conn, tag)
-        with laps.lap("snapshot"):
-            snapshot.sync(self.settings.db_path)
+        # The snapshot catches up in `fresh` or the background refresher, not here: the crawler
+        # may have written millions of battles since, and this visitor shouldn't wait on them.
         log.info("stored %s: %d new battles in %.2fs (%s)", tag, new, laps.total, laps)
         return new
+
+    def fresh(self) -> None:
+        """Pick up new battles now if there are only a few; otherwise leave it to the refresher."""
+        a = self.analyzer
+        if a._base_df is None:
+            a.refresh()
+        elif a.behind() > INLINE_BATTLES or not a.refresh(wait=False):
+            # Too many to absorb now, or the refresher is already at it: use what's loaded.
+            self.wants_refresh = True
+
+    def refresh(self) -> None:
+        """The background refresher's work: catch up with the crawler."""
+        self.wants_refresh = False
+        started = time.monotonic()
+        behind = self.analyzer.behind()
+        if not behind:
+            return
+        self.analyzer.refresh()
+        log.info("caught up %d battles in %.2fs", behind, time.monotonic() - started)
 
     def report(self, tag: str, on_step: Callable[[str], None] | None = None) -> dict[str, Any]:
         """The whole report. `on_step` hears each section's name as it starts."""
         a, laps = self.analyzer, Laps(on_step)
         with laps.lap("data"):
-            a.decks()  # loads or refreshes the shared table, so its cost shows on its own
+            self.fresh()  # its own lap, so the cost of new battles shows separately
         with laps.lap("games"):
             items = insights.games(a, tag)
         with laps.lap("overview"):
