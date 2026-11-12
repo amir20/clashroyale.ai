@@ -239,12 +239,21 @@ def shared_cards(ids: Sequence[int]) -> pl.Expr:
 
 
 class Analyzer:
-    def __init__(self, db_path: Path | str, window_days: int = 0, follow: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        window_days: int = 0,
+        follow: bool = True,
+        sync_limit: int | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.window_days = window_days  # 0 = load every battle in the snapshot
         # Pick up new battles on every read. The web server turns this off and calls `refresh`
         # itself, so a report never stalls absorbing a crawl and its table can't change midway.
         self.follow = follow
+        # Convert at most this many new battles from SQLite into the snapshot; past that, read
+        # only the Parquet the crawler has already written. None = always convert everything.
+        self.sync_limit = sync_limit
         self._cache: dict[Hashable, Any] = {}
         self._field: dict[Hashable, tuple[float, Any]] = {}  # see _field_cached
         self._refreshing: set[Hashable] = set()
@@ -270,22 +279,24 @@ class Analyzer:
         return self._base_df
 
     def behind(self) -> int:
-        """How many battles the database has that the loaded table doesn't (an upper bound)."""
-        latest = self.scalar("SELECT coalesce(max(rowid), 0) FROM battles") or 0
-        return max(0, latest - self._covered)
+        """How many battle ids the snapshot has that the loaded table doesn't (an upper bound)."""
+        return max(0, snapshot.covered_rowid(self.db_path) - self._covered)
 
     def refresh(self, wait: bool = True) -> bool:
         """Bring the table up to date with the database: sync the snapshot, then load or append.
 
         Readers in other threads keep using the table they already have until this swaps in the
-        new one. With `wait` off, gives up (returning False) if another refresh is running.
+        new one. With `wait` off, gives up (returning False) if another refresh or another
+        process's snapshot sync is running.
         """
         if not self.db_path.exists():
             raise FileNotFoundError(f"No database at {self.db_path}. Run `crai crawl` first.")
         if not self._load_lock.acquire(blocking=wait):
             return False
         try:
-            snapshot.sync(self.db_path)
+            limit = self.sync_limit
+            if limit is None or snapshot.backlog(self.db_path) <= limit:
+                snapshot.sync(self.db_path, wait)
             with self.session() as conn:
                 rows = conn.execute("SELECT tag FROM players WHERE is_seed = 1")
                 seeds = frozenset(r[0] for r in rows)
@@ -296,6 +307,8 @@ class Analyzer:
                 self._append(seeds)
             if self.window_days and time.monotonic() - self._trimmed_at > TRIM_SECONDS:
                 self._trim()
+        except snapshot.Busy:
+            return False
         finally:
             self._load_lock.release()
         return True
@@ -317,7 +330,9 @@ class Analyzer:
 
     def _load(self, seeds: frozenset[str]) -> None:
         started = time.perf_counter()
-        self._covered, raw = snapshot.read(self.db_path, self.window_days, 0, self._prepare(seeds))
+        self._covered, raw = snapshot.read(
+            self.db_path, self.window_days, 0, self._prepare(seeds), sync=False
+        )
         # rechunk: Parquet parts arrive as several chunks, which makes list ops ~3x slower.
         self._base_df = raw.rechunk()
         self._seeds, self._trimmed_at = seeds, time.monotonic()
@@ -335,7 +350,7 @@ class Analyzer:
         assert self._base_df is not None
         started = time.perf_counter()
         covered, new = snapshot.read(
-            self.db_path, self.window_days, self._covered, self._prepare(seeds)
+            self.db_path, self.window_days, self._covered, self._prepare(seeds), sync=False
         )
         reflag = seeds != self._seeds
 

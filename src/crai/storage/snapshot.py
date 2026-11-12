@@ -8,7 +8,9 @@ snapshot keeps them as Parquet parts in `<db>.snapshot/`:
     decks-000164180-000490833.parquet   rows appended by a later sync
 
 `sync()` appends only battles newer than the highest rowid already covered (battles are
-append-only between migrations), so refreshing after a crawl or `refresh_player` is cheap.
+append-only between migrations), so refreshing after a crawl or `refresh_player` is cheap. The
+crawler syncs as it goes, so the web server can read Parquet that's already there instead of
+converting SQLite rows itself.
 Migrations that delete battles call `invalidate()`. A lock file serializes sync/compact/read across
 processes (CLI, MCP server, crawler), and parts are written to a temp file then renamed.
 
@@ -65,12 +67,19 @@ def snapshot_dir(db_path: Path) -> Path:
     return db_path.with_name(db_path.name + ".snapshot")
 
 
+class Busy(Exception):
+    """Another process holds the snapshot (and the caller asked not to wait)."""
+
+
 @contextmanager
-def _locked(db_path: Path) -> Generator[None]:
+def _locked(db_path: Path, wait: bool = True) -> Generator[None]:
     d = snapshot_dir(db_path)
     d.mkdir(parents=True, exist_ok=True)
     with (d / ".lock").open("w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise Busy(db_path) from None
         yield
 
 
@@ -88,6 +97,13 @@ def _parts(d: Path) -> list[tuple[int, int, Path]]:
 def covered_rowid(db_path: Path) -> int:
     parts = _parts(snapshot_dir(db_path))
     return parts[-1][1] if parts else 0
+
+
+def backlog(db_path: Path) -> int:
+    """How many battle ids the database has past what the snapshot covers (an upper bound)."""
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60)) as conn:
+        latest: int = conn.execute("SELECT coalesce(max(rowid), 0) FROM battles").fetchone()[0]
+    return max(0, latest - covered_rowid(db_path))
 
 
 def _read_range(conn: sqlite3.Connection, lo: int, hi: int) -> pl.DataFrame:
@@ -120,9 +136,12 @@ def _write(d: Path, lo: int, hi: int, df: pl.DataFrame) -> None:
     tmp.replace(final)  # atomic
 
 
-def sync(db_path: Path) -> int:
-    """Bring the snapshot up to date with the database. Returns the number of rows appended."""
-    with _locked(db_path):
+def sync(db_path: Path, wait: bool = True) -> int:
+    """Bring the snapshot up to date with the database. Returns the number of rows appended.
+
+    With `wait` off, raises Busy instead of waiting for another process's sync.
+    """
+    with _locked(db_path, wait):
         return _sync(db_path)
 
 
@@ -179,15 +198,17 @@ def read(
     days: int = 0,
     after: int = 0,
     transform: Callable[[pl.LazyFrame], pl.LazyFrame] | None = None,
+    sync: bool = True,
 ) -> tuple[int, pl.DataFrame]:
-    """Sync, then return (covered rowid, deck appearances).
+    """Sync (unless `sync` is off), then return (covered rowid, deck appearances).
 
     `days` keeps only recent battles. `after` keeps only battles with a higher id, so a reader
     that already holds everything up to it can fetch just what's new. `transform` runs while
     reading, which is faster than changing the collected table.
     """
     with _locked(db_path):
-        _sync(db_path)
+        if sync:
+            _sync(db_path)
         parts = [p for p in _parts(snapshot_dir(db_path)) if p[1] > after]
         if not parts:
             empty = pl.DataFrame(schema=_schema()).drop("result")

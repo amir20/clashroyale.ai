@@ -28,8 +28,9 @@ DAILY_QUESTIONS = 5
 HEARTBEAT_SECONDS = 1.6
 LOADS_PER_MINUTE = 20
 # A report picks up new battles itself only when there are this few (someone's own battlelog).
-# More means the crawler just ran: absorbing millions of rows takes the NAS ~30 s, so the
-# background refresher does it while reports use the table they have.
+# More means the crawler just wrote a batch: loading it takes the NAS a while, so the background
+# refresher does it while reports use the table they have. The server also converts at most this
+# many battles from SQLite; the crawler writes the rest to the snapshot.
 INLINE_BATTLES = 2_000
 REFRESH_SECONDS = 300  # how often the background refresher catches up with the crawler
 REFRESH_POLL_SECONDS = 5
@@ -95,7 +96,11 @@ class Service:
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None) -> None:
         self.settings = settings
         self.transport = transport
-        self.analyzer = Analyzer(settings.db_path, settings.analytics_days, follow=False)
+        # The crawler writes its battles to the Parquet snapshot itself; the server converts only
+        # the few it stores for visitors.
+        self.analyzer = Analyzer(
+            settings.db_path, settings.analytics_days, follow=False, sync_limit=INLINE_BATTLES
+        )
         self.lock = asyncio.Lock()  # one writer and one analytics load at a time
         self.usage = Usage(settings.db_path.with_name("app.db"))
         self.fetched_at: dict[str, float] = {}
@@ -145,14 +150,9 @@ class Service:
             self.wants_refresh = True
 
     def refresh(self) -> None:
-        """The background refresher's work: catch up with the crawler."""
+        """The background refresher's work: load what the crawler added to the snapshot."""
         self.wants_refresh = False
-        started = time.monotonic()
-        behind = self.analyzer.behind()
-        if not behind:
-            return
         self.analyzer.refresh()
-        log.info("caught up %d battles in %.2fs", behind, time.monotonic() - started)
 
     def report(self, tag: str, on_step: Callable[[str], None] | None = None) -> dict[str, Any]:
         """The whole report. `on_step` hears each section's name as it starts."""

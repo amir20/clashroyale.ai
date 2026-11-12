@@ -22,6 +22,8 @@ lazy from crai.storage import database as db
 lazy from crai.storage import snapshot
 lazy from crai.storage.upgrade import upgrade
 
+SNAPSHOT_EVERY_SECONDS = 180  # how often a running crawl writes its battles to the snapshot
+
 
 @app.command("sync-cards")
 def sync_cards_cmd() -> None:
@@ -71,7 +73,25 @@ def crawl_cmd(
     )
     live = not _state["json"] and ui.console.is_terminal
 
+    async def keep_snapshot_fresh() -> None:
+        """Write new battles to the analytics snapshot as the crawl goes, not all at the end,
+        so the web server reads them as Parquet instead of converting SQLite rows itself."""
+        while True:
+            await asyncio.sleep(SNAPSHOT_EVERY_SECONDS)
+            try:
+                n = await asyncio.to_thread(snapshot.sync, s.db_path)
+                log.info("snapshot: appended %d deck rows", n)
+            except Exception:
+                log.warning("snapshot sync during crawl failed", exc_info=True)
+
     async def run() -> dict[str, Any]:
+        syncing = asyncio.create_task(keep_snapshot_fresh())
+        try:
+            return await crawl_and_count()
+        finally:
+            syncing.cancel()
+
+    async def crawl_and_count() -> dict[str, Any]:
         async with ClashClient(tokens, s.api_base, concurrency=concurrency) as c:
             with db.session(s.db_path) as conn:
                 n_cards = await sync_cards(c, conn)

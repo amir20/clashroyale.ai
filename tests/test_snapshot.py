@@ -185,3 +185,32 @@ def test_player_stats_survive_small_trophy_moves(analyzer: Analyzer) -> None:
     assert stat(14979) == 14949  # 30 trophies: same people, cached
     assert stat(15300) == 15300  # far enough to compare against different players
     assert calls == [14949, 15300]
+
+
+def test_server_reads_the_crawlers_parquet_instead_of_converting_a_backlog(db_path: Path) -> None:
+    snapshot.sync(db_path)
+    server = Analyzer(db_path, follow=False, sync_limit=10)
+    assert server.decks().height == 400
+    add_battles(db_path, 50)  # a crawl batch the crawler hasn't written to the snapshot yet
+    assert server.refresh()
+    assert server.decks().height == 400  # too many to convert here: left to the crawler
+    snapshot.sync(db_path)  # the crawler's periodic sync
+    assert server.behind() == 50
+    assert server.refresh()
+    assert server.decks().height == 500
+    add_battles(db_path, 3, offset_days=60)  # a visitor's own few battles
+    assert server.refresh()
+    assert server.decks().height == 506  # converted inline
+
+
+def test_a_refresh_that_wont_wait_skips_a_busy_snapshot(db_path: Path) -> None:
+    snapshot.sync(db_path)
+    server = Analyzer(db_path, follow=False, sync_limit=10)
+    server.decks()
+    add_battles(db_path, 3)
+    with snapshot._locked(db_path):  # the crawler is mid-sync
+        assert not server.refresh(wait=False)
+        with pytest.raises(snapshot.Busy):
+            snapshot.sync(db_path, wait=False)
+    assert server.refresh(wait=False)
+    assert server.decks().height == 406
