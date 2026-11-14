@@ -150,6 +150,16 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
                         }
                     )
                     return
+                # Show who it is right away (name, trophies, deck) while the rest loads.
+                await emit(
+                    {
+                        "type": "status",
+                        "step": "found",
+                        "progress": 24,
+                        "message": voice.found(profile.get("name"), len(battles), them),
+                        "player": svc.player_card(tag, profile),
+                    }
+                )
                 await wake()  # the warm-up holds the snapshot while it reads it
                 await emit(
                     {
@@ -173,6 +183,18 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
                 finally:
                     svc.lock.release()
                 svc.fetched_at[tag] = time.monotonic()
+            else:  # loaded a few minutes ago: who it is comes from the database
+                player = await asyncio.to_thread(svc.player_card, tag)
+                if player:
+                    await emit(
+                        {
+                            "type": "status",
+                            "step": "found",
+                            "progress": 24,
+                            "message": voice.found(player["name"], None, them),
+                            "player": player,
+                        }
+                    )
             await wake()
             await emit(
                 {

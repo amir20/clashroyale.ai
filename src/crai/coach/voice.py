@@ -220,6 +220,16 @@ def try_line(r: dict[str, Any]) -> str:
     return f"None of your cards is hurting you. {pop}".strip()
 
 
+def found(name: str | None, battles: int | None, them: bool) -> str:
+    """The loading line once we know who it is."""
+    who = name or ("them" if them else "you")
+    if battles is None:
+        return f"Found {who}. Let's take a look…"
+    if not battles:
+        return f"Found {who}, but no recent battles. I'll do what I can…"
+    return f"Found {who}. Reading {battles} recent battles…"
+
+
 def model_pick(m: dict[str, Any] | None) -> str | None:
     """Rook's line for the deck model's own suggestion, with what battle data says about it."""
     if not m:

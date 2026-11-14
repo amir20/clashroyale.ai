@@ -14,7 +14,7 @@ from typing import Any, Literal
 import httpx
 
 from crai.analysis import insights, visuals
-from crai.analysis.analytics import Analyzer
+from crai.analysis.analytics import DEFAULT_SINCE_DAYS, Analyzer
 from crai.coach import voice
 from crai.collect.client import ClashClient
 from crai.config import Settings
@@ -99,8 +99,14 @@ class Service:
         self.transport = transport
         # The crawler writes its battles to the Parquet snapshot itself; the server converts only
         # the few it stores for visitors.
+        # Lean: only the battles reports use, held once. A week, the default every stat uses,
+        # unless CRAI_ANALYTICS_DAYS says otherwise.
         self.analyzer = Analyzer(
-            settings.db_path, settings.analytics_days, follow=False, sync_limit=INLINE_BATTLES
+            settings.db_path,
+            settings.analytics_days or DEFAULT_SINCE_DAYS,
+            follow=False,
+            sync_limit=INLINE_BATTLES,
+            lean=True,
         )
         self.lock = asyncio.Lock()  # one writer and one analytics load at a time
         self.usage = Usage(settings.db_path.with_name("app.db"))
@@ -128,6 +134,44 @@ class Service:
                 "SELECT profile_fetched_at FROM players WHERE tag = ?", (tag,)
             ).fetchone()
         return bool(row and row[0])
+
+    def player_card(self, tag: str, profile: Any = None) -> dict[str, Any] | None:
+        """Who's being loaded, for the loading screen: from the profile just fetched, or the one
+        stored. Their deck only comes with a fresh profile."""
+        if profile is not None:
+            clan = profile.get("clan") or {}
+            arena = profile.get("arena") or {}
+            deck = []
+            for c in profile.get("currentDeck") or []:
+                icons, level = c.get("iconUrls") or {}, c.get("evolutionLevel") or 0
+                icon = (icons.get("heroMedium") if level & 2 else None) or (
+                    icons.get("evolutionMedium") if level & 1 else None
+                )
+                deck.append({"name": c.get("name"), "icon": icon or icons.get("medium")})
+            row = {
+                "name": profile.get("name"),
+                "level": profile.get("expLevel"),
+                "trophies": profile.get("trophies"),
+                "best_trophies": profile.get("bestTrophies"),
+                "wins": profile.get("wins"),
+                "battles": profile.get("battleCount"),
+                "three_crowns": profile.get("threeCrownWins"),
+                "clan": clan.get("name"),
+                "arena": arena.get("name"),
+            }
+            return row | {"deck": deck}
+        if not self.settings.db_path.exists():
+            return None
+        with db.session(self.settings.db_path, read_only=True) as conn:
+            r = conn.execute(
+                """SELECT name, exp_level, trophies, best_trophies, wins, battle_count,
+                          three_crown_wins, clan_name, arena FROM players WHERE tag = ?""",
+                (tag,),
+            ).fetchone()
+        if r is None or r[0] is None:
+            return None
+        keys = ("name", "level", "trophies", "best_trophies", "wins", "battles", "three_crowns")
+        return dict(zip((*keys, "clan", "arena"), r, strict=True)) | {"deck": []}
 
     def store(self, profile: Any, battles: list[Any], tag: str) -> int:
         laps = Laps()

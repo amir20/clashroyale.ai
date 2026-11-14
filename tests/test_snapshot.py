@@ -232,3 +232,12 @@ def test_decks_carry_their_average_card_level(db_path: Path) -> None:
     _, decks = snapshot.read(db_path)
     # Every fixture card is one below its rarity's max: 15 on the in-game scale (16 = max).
     assert decks["level"].unique().to_list() == [15.0]
+
+
+def test_a_lean_analyzer_holds_the_deck_table_once(db_path: Path) -> None:
+
+    full, lean = Analyzer(db_path), Analyzer(db_path, 7, lean=True)
+    assert lean.decks() is lean._base()  # the default view is the table, not a copy
+    assert lean.decks().height == full.decks().height
+    ranked = Filters(battle_types=("pathOfLegend",))
+    assert lean.decks(ranked).height == full.decks(ranked).height

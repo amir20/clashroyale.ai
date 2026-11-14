@@ -469,3 +469,14 @@ def test_report_leaves_a_crawl_sized_backlog_to_the_refresher(
         svc.report(ME)
         assert calls == [False]  # a few battles: picked up inline, never waiting on a refresh
         assert not svc.wants_refresh
+
+
+def test_loading_shows_who_it_is_before_the_report(db_path: Path) -> None:
+    with client(db_path) as c:
+        out = events(c.get(f"/api/players/{ME[1:]}/load").text)
+    found = [e for e in out if e.get("player")]
+    assert found, "the loading screen gets the player's name and numbers"
+    player = found[0]["player"]
+    assert player["name"] == "me" and "trophies" in player and len(player["deck"]) == 8
+    assert player["name"] in found[0]["message"]
+    assert out.index(found[0]) < len(out) - 1  # before the report

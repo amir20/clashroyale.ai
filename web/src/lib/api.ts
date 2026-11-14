@@ -104,8 +104,21 @@ export type Usage = {
   input_tokens?: number;
   output_tokens?: number;
 };
+/** Who's being loaded, shown while the report is built. */
+export type LoadingPlayer = {
+  name: string | null;
+  level: number | null;
+  trophies: number | null;
+  best_trophies: number | null;
+  wins: number | null;
+  battles: number | null;
+  three_crowns: number | null;
+  clan: string | null;
+  arena: string | null;
+  deck: { name: string | null; icon: string | null }[];
+};
 export type LoadEvent =
-  | { type: "status"; step: string; message: string; progress?: number; known?: boolean }
+  | { type: "status"; step: string; message: string; progress?: number; known?: boolean; player?: LoadingPlayer | null }
   | { type: "ready"; report: Report }
   | { type: "error"; code?: string; message: string };
 

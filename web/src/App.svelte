@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { cleanTag, loadPlayer, type Card, type LoadEvent, type Report } from "./lib/api";
+  import { cleanTag, loadPlayer, type Card, type LoadEvent, type LoadingPlayer, type Report } from "./lib/api";
   import Ask from "./lib/Ask.svelte";
   import CardSheet from "./lib/CardSheet.svelte";
   import Rook, { type Mood } from "./lib/Rook.svelte";
@@ -11,6 +11,7 @@
   let input = $state("");
   let status = $state("");
   let progress = $state(0);
+  let who = $state<LoadingPlayer | null>(null); // the player being loaded, once known
   let error = $state("");
   let shaking = $state(false);
   let tag = $state("");
@@ -54,6 +55,7 @@
   async function onEvent(e: LoadEvent) {
     if (e.type === "status") {
       status = e.message;
+      if (e.player) who = e.player;
       if (e.progress) progress = e.progress;
     } else if (e.type === "error") {
       fail(e.message);
@@ -85,6 +87,7 @@
     error = "";
     report = null;
     progress = 3;
+    who = null;
     status = "Waking up…";
     phase = "loading";
     stop = loadPlayer(cleaned, onEvent, them);
@@ -142,9 +145,34 @@
     <p class="mt-3 max-w-xs min-h-14 text-lg leading-snug" class:text-error={!!error} aria-live="polite">{heroLine}</p>
 
     {#if phase === "loading"}
-      <div class="w-full max-w-xs mt-5 pop">
+      <div class="w-full max-w-sm mt-5 pop">
         <progress class="progress progress-primary w-full h-3" value={progress} max="100"></progress>
-        <p class="text-sm opacity-60 mt-2 dots">#{tag}</p>
+        {#if who}
+          <!-- Who's being loaded: something to look at while the report is built. -->
+          <div class="panel mt-4 p-4 text-left pop" data-testid="loading-player">
+            <div class="flex items-baseline justify-between gap-3">
+              <div class="min-w-0">
+                <div class="game game-shadow text-2xl truncate">{who.name ?? `#${tag}`}</div>
+                <div class="text-xs text-base-content/60 truncate">{[who.clan ?? "No clan", who.arena].filter(Boolean).join(" · ")}</div>
+              </div>
+              {#if who.level}<span class="shrink-0 rounded-lg bg-accent/20 text-accent text-xs font-semibold px-2 py-1">Level {who.level}</span>{/if}
+            </div>
+            <div class="grid grid-cols-3 gap-2 mt-3 text-center">
+              <div><div class="stat-num text-lg text-primary">{who.trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Trophies</div></div>
+              <div><div class="stat-num text-lg">{who.best_trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Best</div></div>
+              <div><div class="stat-num text-lg">{who.wins != null && who.battles ? `${Math.round((who.wins / who.battles) * 100)}%` : "—"}</div><div class="text-[11px] text-base-content/60">{who.wins != null ? `${who.wins.toLocaleString()} wins` : "Wins"}</div></div>
+            </div>
+            {#if who.deck.length}
+              <div class="grid grid-cols-8 gap-1 mt-3" aria-label="Current deck">
+                {#each who.deck as c, i (i)}
+                  {#if c.icon}<img src={c.icon} alt={c.name ?? ""} class="w-full" loading="lazy" />{:else}<div class="aspect-[5/6] rounded bg-base-300"></div>{/if}
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <p class="text-sm opacity-60 mt-2 dots">#{tag}</p>
+        {/if}
       </div>
     {:else if phase === "landing"}
       <form class="w-full max-w-xs mt-5" class:shake={shaking} onsubmit={(e) => { e.preventDefault(); start(input); }}>
@@ -155,6 +183,12 @@
         <button class="btn btn-primary btn-lg btn-game w-full mt-4 font-semibold">Roast my deck</button>
         <p class="text-xs opacity-60 mt-3">Find your tag under your name on your in-game profile.</p>
       </form>
+      <!-- What this is, for someone who just landed here. -->
+      <ul class="w-full max-w-sm mt-7 grid gap-2.5 text-left text-sm text-base-content/80" data-testid="what-it-does">
+        <li class="flex gap-3 items-start"><span class="game text-primary text-lg leading-5 w-5 shrink-0 text-center">1</span><span>Reads your <b>recent battles</b>: no login, just your tag.</span></li>
+        <li class="flex gap-3 items-start"><span class="game text-primary text-lg leading-5 w-5 shrink-0 text-center">2</span><span>Compares you with <b>millions of battles</b> from players at your trophies.</span></li>
+        <li class="flex gap-3 items-start"><span class="game text-primary text-lg leading-5 w-5 shrink-0 text-center">3</span><span>Tells you <b>what's costing you games</b>, what each card adds, and <b>which cards to swap</b>, with the numbers to back it up.</span></li>
+      </ul>
     {/if}
   </section>
 

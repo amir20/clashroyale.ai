@@ -543,10 +543,11 @@ def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game], n_special
     """
 
     def alike(decks: pl.DataFrame) -> pl.DataFrame:
+        # Narrow by shared cards first: anything else first copies every row of the table.
         return (
-            decks.filter(pl.col("player_tag") != tag)
+            decks.filter(shared_cards(mine).is_between(4, 7))
+            .filter(pl.col("player_tag") != tag)
             .with_columns(shared=shared_cards(mine))
-            .filter(pl.col("shared").is_between(4, 7))
             .filter(special_count() == n_special)
         )
 
@@ -604,10 +605,12 @@ class SwapField:
         self._all: pl.DataFrame | None = None
 
     def _alike(self, d: pl.DataFrame) -> pl.DataFrame:
+        need = min(len(self._others), CLOSE_SHARED_CARDS)
+        # Narrow by shared cards first: anything else first copies every row of the table.
         return (
-            d.filter(pl.col("player_tag") != self._tag)
+            d.filter(shared_cards(self._others) >= need)
+            .filter(pl.col("player_tag") != self._tag)
             .with_columns(shared=shared_cards(self._others))
-            .filter(pl.col("shared") >= min(len(self._others), CLOSE_SHARED_CARDS))
             .filter(special_count() == self._n_special)  # after: parsing specials is slower
         )
 
@@ -1495,11 +1498,20 @@ def signature_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] |
         field = near_player(a.decks(), items)
         if field is None or field.height < MIN_FAMILY_DECKS:
             field = a.decks()
-        return (
-            field.explode("cards")
-            .filter(pl.col("cards").is_in(used))
-            .group_by("cards")
-            .agg(games=pl.len(), rate=pl.col("score").mean())
+        # One yes/no column per card rather than a row per card: exploding the field would
+        # make 8 copies of every row (17 GB for the whole table).
+        has = {str(c): pl.col("cards").list.contains(c) for c in used}
+        sums = field.select(
+            *(h.sum().alias(f"g{c}") for c, h in has.items()),
+            *(pl.col("score").filter(h).sum().alias(f"w{c}") for c, h in has.items()),
+        ).row(0, named=True)
+        return pl.DataFrame(
+            [
+                {"cards": c, "games": sums[f"g{c}"], "rate": sums[f"w{c}"] / sums[f"g{c}"]}
+                for c in used
+                if sums[f"g{c}"]
+            ],
+            schema={"cards": pl.Int64, "games": pl.Int64, "rate": pl.Float64},
         )
 
     rates = _near_stat(a, ("card_rates", tag, tuple(sorted(used))), items, card_rates)
@@ -1533,9 +1545,11 @@ def unique_deck(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | No
     def count() -> tuple[int, int]:
         field = near_player(a.decks(), items)
         assert field is not None  # scope is known
-        others = field.filter(pl.col("player_tag") != tag)
-        shared = others.with_columns(s=shared_cards(mine))
-        alike = shared.filter(pl.col("s") >= UNIQUE_DECK_SHARED)["player_tag"].n_unique()
+        # Two columns, not a copy of every column.
+        others = field.select("player_tag", s=shared_cards(mine)).filter(
+            pl.col("player_tag") != tag
+        )
+        alike = others.filter(pl.col("s") >= UNIQUE_DECK_SHARED)["player_tag"].n_unique()
         return alike, others["player_tag"].n_unique()
 
     alike, total = _near_stat(a, ("unique", tag, key), items, count)

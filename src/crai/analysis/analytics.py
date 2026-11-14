@@ -228,6 +228,16 @@ def records(df: pl.DataFrame, limit: int | None = None) -> list[Row]:
     return df.with_columns(pl.col(pl.Float64, pl.Float32).round(3)).to_dicts()
 
 
+def _holds(f: Filters, kept: int) -> bool:
+    """Whether a lean table (competitive collection decks from the last `kept` days) is already
+    exactly what `f` asks for, trophies aside."""
+    return (
+        not f.battle_types
+        and f.deck_selection in (None, "collection")
+        and (not f.since_days or f.since_days >= kept)
+    )
+
+
 def _is_decks(key: Hashable) -> TypeIs[tuple[str, Filters]]:
     """A cached filtered copy of the deck table (see `Analyzer.decks`)."""
     return isinstance(key, tuple) and key[0] == "decks"
@@ -276,8 +286,13 @@ class Analyzer:
         window_days: int = 0,
         follow: bool = True,
         sync_limit: int | None = None,
+        lean: bool = False,
     ) -> None:
         self.db_path = Path(db_path)
+        # Lean (the web server): keep only the battles every report looks at (competitive 1v1
+        # with normal decks) and let the default view be the table itself. Otherwise the default
+        # view is a filtered copy of nearly every row: twice the memory for the same data.
+        self.lean = lean
         self.window_days = window_days  # 0 = load every battle in the snapshot
         # Pick up new battles on every read. The web server turns this off and calls `refresh`
         # itself, so a report never stalls absorbing a crawl and its table can't change midway.
@@ -349,6 +364,11 @@ class Analyzer:
         about half the memory, so the server can hold twice the battles."""
 
         def shape(scan: pl.LazyFrame) -> pl.LazyFrame:
+            if self.lean:
+                scan = scan.filter(
+                    ~pl.col("battle_type").fill_null("").is_in(EXCLUDED_TYPES),
+                    pl.col("deck_selection").fill_null("collection") == "collection",
+                )
             return scan.with_columns(
                 pl.col("player_tag", "deck_key", "battle_type", "deck_selection", "specials").cast(
                     pl.Categorical()
@@ -395,7 +415,7 @@ class Analyzer:
         # Filtered copies grow by the same rows instead of filtering everything again. Field-wide
         # stats in `_field` stay: a few hundred battles don't move them.
         self._cache = {
-            k: grow(v, self._filter(new, k[1]))
+            k: grow(v, self._filter(new, k[1], self._kept()))
             for k, v in list(self._cache.items())  # a report thread may be adding entries
             if _is_decks(k)
         }
@@ -580,18 +600,26 @@ class Analyzer:
         # Trophy limits are applied later (in _subject), so leave them out of the cache key:
         # otherwise every player's trophy range would cache its own copy of the whole table.
         key = replace(f, min_trophies=None, max_trophies=None)
-        return self._cached(("decks", key), lambda: self._filter(base, key))
+        kept = self._kept()
+        if kept is not None and _holds(key, kept):
+            return base  # the table already is this view: no copy
+        return self._cached(("decks", key), lambda: self._filter(base, key, kept))
+
+    def _kept(self) -> int | None:
+        """In lean mode, the days the table already holds (only competitive collection decks):
+        filters it already satisfies are skipped. None otherwise."""
+        return (self.window_days or None) if self.lean else None
 
     @staticmethod
-    def _filter(d: pl.DataFrame, f: Filters) -> pl.DataFrame:
+    def _filter(d: pl.DataFrame, f: Filters, kept: int | None = None) -> pl.DataFrame:
         battle_type = pl.col("battle_type").fill_null("")
         if f.battle_types:
             d = d.filter(battle_type.is_in(f.battle_types))
-        else:
+        elif kept is None:
             d = d.filter(~battle_type.is_in(EXCLUDED_TYPES))
-        if f.deck_selection:
+        if f.deck_selection and not (kept is not None and f.deck_selection == "collection"):
             d = d.filter(pl.col("deck_selection").fill_null("collection") == f.deck_selection)
-        if f.since_days:
+        if f.since_days and not (kept is not None and f.since_days >= kept):
             cutoff = datetime.now(UTC) - timedelta(days=f.since_days)
             d = d.filter(pl.col("battle_time") >= cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
         return d
