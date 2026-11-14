@@ -293,7 +293,7 @@
             {/if}
             {#if s.replace.core}
               <div class="mt-3 text-xs text-base-content/60 text-center lg:text-left" data-testid="core">
-                <span class="font-semibold text-base-content/80">Your core:</span> {s.replace.core.map((c: any) => c.name).join(", ")} · <span class="font-semibold text-base-content/80">flex:</span> {s.replace.flex.map((c: any) => c.name).join(", ")}
+                <span class="font-semibold text-base-content/80">Your core:</span> {s.replace.core.map((c: any) => c.name).join(", ")}{#if s.replace.flex.length} · <span class="font-semibold text-base-content/80">flex:</span> {s.replace.flex.map((c: any) => `${c.name} (${Math.round(c.keep * 100)}% keep it)`).join(", ")}{:else} · a standard list{/if}
                 {#if s.replace.popular}<div class="mt-1">Most players with this core run {s.replace.popular.cards.map((c: any) => c.name).join(" + ")} ({s.replace.popular.games.toLocaleString()} games, {Math.round(s.replace.popular.win_rate * 100)}% won)</div>{/if}
               </div>
             {/if}

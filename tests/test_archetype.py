@@ -93,3 +93,19 @@ def test_when_nobody_keeps_their_flex_cards_compare_with_the_core(
     assert r["your_fill_games"] == 0
     assert sorted(c["id"] for c in r["popular"]["cards"]) == sorted((XBOW, PEKKA, MK))
     assert "than other decks with your core" in voice.try_line(r)
+
+
+def test_a_deck_everyone_copies_is_all_core(tmp_path: Path) -> None:
+    a = build(tmp_path / "s.db", [(CYCLE, OPP, k % 2 == 0) for k in range(480)])
+    r = insights.replace_card(a, ME, insights.games(a, ME))
+    assert r["standard"] is True
+    assert r["flex"] == [] and r["candidates"] == []
+    assert {c["id"] for c in r["core"]} == set(CYCLE)
+    assert all(c["keep"] == 1.0 for c in r["core"])
+    assert "standard" in voice.try_line(r)
+
+
+def test_keep_rates_say_how_staple_each_card_is(arch_analyzer: Analyzer) -> None:
+    r = insights.replace_card(arch_analyzer, ME, insights.games(arch_analyzer, ME))
+    assert all(c["keep"] >= insights.MIN_KEEP for c in r["core"])
+    assert all(c["keep"] < 1 for c in r["flex"])  # each flex card is changed by someone

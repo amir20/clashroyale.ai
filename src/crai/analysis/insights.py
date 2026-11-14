@@ -7,7 +7,6 @@ answers need no AI call and can't be hallucinated. `coach.py` turns these result
 from collections import Counter, defaultdict
 from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass, field, replace
-from itertools import combinations
 from math import ceil
 from statistics import median
 from typing import Any
@@ -803,6 +802,7 @@ def match(h2h: HeadToHead, cards: dict[int, dict[str, Any]]) -> dict[str, Any]:
 # An archetype: the cards of the player's deck that many players run together (the core, staples
 # nobody changes), and the rest (flex), where decks built on that core vary.
 MIN_CORE_CARDS = 3
+MIN_KEEP = 0.5  # a core card is kept by at least this share of decks with the rest of the core
 MIN_CORE_GAMES = 1000
 MIN_CORE_PLAYERS = 100  # fewer, and the "core" is one person's exact deck
 MIN_PACKAGE_PLAYERS = 30
@@ -812,7 +812,8 @@ PACKAGES_CHECKED = 15
 @dataclass(frozen=True)
 class Archetype:
     core: tuple[int, ...]  # card_id * 10 + status, like `variants()`
-    flex: tuple[int, ...]
+    flex: tuple[int, ...]  # empty for a standard deck everyone copies as is
+    keep: dict[int, float]  # per card: share of decks with the rest of the core that run it
     decks: pl.DataFrame  # other players' decks with the core
     near: bool  # within the player's trophy range
 
@@ -822,9 +823,13 @@ def _as_card(cards: dict[int, dict[str, Any]], v: int) -> dict[str, Any]:
 
 
 def archetype(a: Analyzer, tag: str, items: list[Game]) -> Archetype | None:
-    """Find the player's core: the largest set of their cards (as played) that enough players
-    run together. Every subset of their 8 cards is counted in one pass, as a bitmask of which of
-    their cards each deck has."""
+    """Find the player's core by peeling: start from all 8 of their cards (as played) and drop
+    the least-kept card until every card left is kept by at least MIN_KEEP of the decks that
+    have the rest, and enough games and players share them.
+
+    keep(c) = games with all of S / games with S minus c. Each deck is a bitmask of which of the
+    player's cards it has, so every count comes from one ≤256-row table.
+    """
     tag = normalize_tag(tag)
     mine = sorted(c * 10 + s for c, s in slots(a, tag, items).items())
     if len(mine) != 8:
@@ -841,24 +846,52 @@ def archetype(a: Analyzer, tag: str, items: list[Game]) -> Archetype | None:
         )
         counts = d.group_by("mask").len().rows()
         who = d.select("mask", "player_tag").unique()  # small: counts players cheaply
-        for size in range(7, MIN_CORE_CARDS - 1, -1):
-            options = []
-            for subset in combinations(range(8), size):
-                bits = sum(1 << i for i in subset)
-                games = sum(n for m, n in counts if m & bits == bits)
-                if games >= MIN_CORE_GAMES:
-                    options.append((games, bits))
-            for _, bits in sorted(options, reverse=True):
-                players = who.filter((pl.col("mask") & bits) == bits)["player_tag"].n_unique()
-                if players < MIN_CORE_PLAYERS:
-                    continue
-                core = tuple(v for i, v in enumerate(mine) if bits >> i & 1)
-                flex = tuple(v for v in mine if v not in core)
-                # Cards are matched as played, so a package that trades a Hero for a plain card
-                # carries the cost of losing the Hero.
-                fam = d.filter((pl.col("mask") & bits) == bits)
-                return Archetype(core, flex, fam.drop("mask"), near)
-        return None
+
+        def games(bits: int) -> int:
+            return sum(n for m, n in counts if m & bits == bits)
+
+        def players(bits: int) -> int:
+            return who.filter((pl.col("mask") & bits) == bits)["player_tag"].n_unique()
+
+        def keeps(bits: int) -> dict[int, float]:
+            have = games(bits)
+            out = {}
+            for i in range(8):
+                if bits >> i & 1:
+                    rest = games(bits & ~(1 << i))
+                    out[i] = have / rest if rest else 0.0
+            return out
+
+        bits = (1 << 8) - 1
+        while True:
+            k = keeps(bits)
+            if (
+                min(k.values()) >= MIN_KEEP
+                and games(bits) >= MIN_CORE_GAMES
+                and players(bits) >= MIN_CORE_PLAYERS
+            ):
+                break
+            if bits.bit_count() <= MIN_CORE_CARDS:
+                return None
+
+            # The least-kept card goes. While too few decks have all of S, every keep is 0: then
+            # the card seen least often next to the others goes.
+            def together(i: int, bits: int = bits) -> int:
+                return sum(games(1 << i | 1 << j) for j in range(8) if j != i and bits >> j & 1)
+
+            worst = min(k, key=lambda i: (k[i], together(i)))
+            bits &= ~(1 << worst)
+        core = tuple(v for i, v in enumerate(mine) if bits >> i & 1)
+        flex = tuple(v for v in mine if v not in core)
+        have = games(bits)
+        keep = {mine[i]: round(x, 2) for i, x in k.items()}
+        for i, v in enumerate(mine):  # a flex card: share of decks with the core that run it
+            if not bits >> i & 1:
+                keep[v] = round(games(bits | 1 << i) / have, 2)
+        # Cards are matched as played, so a package that trades a Hero for a plain card carries
+        # the cost of losing the Hero.
+        fam = d.filter((pl.col("mask") & bits) == bits)
+        return Archetype(core, flex, keep, fam.drop("mask"), near)
 
     def pick() -> Archetype | None:
         # What a deck is doesn't depend on trophies, so the core comes from everyone's decks:
@@ -1108,6 +1141,10 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         key=lambda r: r["gain"],
     )
     arch = archetype(a, tag, items)
+
+    def kept(v: int) -> dict[str, Any]:
+        return _as_card(cards, v) | {"keep": arch.keep.get(v) if arch else None}
+
     core_ids = {v // 10 for v in arch.core} if arch else set()
     # Staples aren't up for swapping: the weakest card is the weakest flex card.
     flexible = [r for r in yours if r["id"] not in core_ids]
@@ -1123,8 +1160,10 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         "min_shared_cards": family.min_shared,
         "family_players": fam["player_tag"].n_unique(),
         "yours": yours,
-        "core": [_as_card(cards, v) for v in arch.core if v // 10 in cards] if arch else None,
-        "flex": [_as_card(cards, v) for v in arch.flex if v // 10 in cards] if arch else None,
+        "core": [kept(v) for v in arch.core if v // 10 in cards] if arch else None,
+        "flex": [kept(v) for v in arch.flex if v // 10 in cards] if arch else None,
+        # Everyone copies this deck as is: nothing is flex, so nothing is suggested.
+        "standard": bool(arch and not arch.flex),
         "archetype_decks": arch.decks.height if arch else 0,
         "archetype_players": arch.decks["player_tag"].n_unique() if arch else 0,
         **(flex_fills(arch, cards) if arch else {"popular": None, "your_fill_games": 0}),

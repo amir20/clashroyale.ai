@@ -101,6 +101,27 @@ def _versus(c: dict[str, Any]) -> str:
     return f"than decks keeping {_pack(c['out'])}"
 
 
+def _standard(r: dict[str, Any]) -> str:
+    """For a deck everyone plays as is: nothing to swap, and which card is changed most."""
+    loosest = min(r["core"], key=lambda c: c["keep"]) if r.get("core") else None
+    msg = "Your deck is a standard list: players with these cards almost always run all 8."
+    if loosest and loosest["keep"] < 1:
+        msg += (
+            f" The card people change most is {_as_played(loosest)}, and even it is kept "
+            f"{_pct(loosest['keep'])} of the time."
+        )
+    return msg
+
+
+def _flex_note(r: dict[str, Any]) -> str:
+    """The flex card closest to being a staple: worth saying it's a judgment call."""
+    flex = sorted(r.get("flex") or [], key=lambda c: c["keep"], reverse=True)
+    if not flex or flex[0]["keep"] < 0.2:
+        return ""
+    c = flex[0]
+    return f"{_as_played(c)} is borderline: {_pct(c['keep'])} of decks with your core run it."
+
+
 def _popular(r: dict[str, Any]) -> str:
     pop = r.get("popular")
     if not pop:
@@ -144,6 +165,8 @@ def replace_card(r: dict[str, Any]) -> str:
             "Weird flex, but okay."
         )
     weak, n = r["weakest"], f"{r['family_decks']:,}"
+    if r.get("standard"):
+        return _standard(r)
     if weak is None:
         return "I couldn't rate your cards this time. Try again after a few more games."
     stats = f"decks with it win {_per_100(weak['gain'])} than decks without it"
@@ -158,7 +181,7 @@ def replace_card(r: dict[str, Any]) -> str:
     if r.get("core"):
         msg += (
             f" Your core is {_played_names(r['core'])}: players keep those, so I only "
-            f"swap your flex cards ({_played_names(r['flex'])})."
+            f"swap your flex cards ({_played_names(r['flex'])}). {_flex_note(r)}"
         )
     if pop := _popular(r):
         msg += " " + pop
@@ -175,9 +198,13 @@ def replace_card(r: dict[str, Any]) -> str:
 
 def try_line(r: dict[str, Any]) -> str:
     """The short version of replace_card, for the story card under the swap art."""
+    if r.get("standard"):
+        return _standard(r)
     if not r.get("enough") or r.get("weakest") is None:
         return replace_card(r)
     weak = r["weakest"]
+    if r.get("standard"):
+        return _standard(r)
     if r["candidates"]:
         c = r["candidates"][0]
         return (

@@ -74,7 +74,7 @@
     {/each}
   </ul>
   {#if data.core}
-    <p class="text-sm mt-5" data-testid="core"><span class="font-semibold">Your core</span> (players keep these): {data.core.map((c: any) => c.name).join(", ")}. <span class="font-semibold">Flex:</span> {data.flex.map((c: any) => c.name).join(", ")}.</p>
+    <p class="text-sm mt-5" data-testid="core"><span class="font-semibold">Your core</span> (players keep these): {data.core.map((c: any) => c.name).join(", ")}. {#if data.flex.length}<span class="font-semibold">Flex:</span> {data.flex.map((c: any) => `${c.name} (${pct(c.keep)} keep it)`).join(", ")}.{:else}A standard list: players run all 8.{/if}</p>
     {#if data.popular}<p class="text-sm mt-1 opacity-80">Most players with this core run {data.popular.cards.map((c: any) => c.name).join(" + ")} ({data.popular.games.toLocaleString()} games, {pct(data.popular.win_rate)} won).</p>{/if}
   {/if}
   {#if data.candidates.length}
