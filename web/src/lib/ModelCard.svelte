@@ -37,7 +37,7 @@
 <div class="flex flex-col gap-4" data-testid="model">
   <div class="flex items-end gap-3">
     <span class="stat-num text-5xl text-primary" data-testid="model-win">{pct(model.win)}</span>
-    <span class="text-sm text-base-content/70 leading-snug pb-1">predicted win chance against {model.field.near ? `decks at ${your} trophies` : "decks at every trophy level"}, if card levels were equal</span>
+    <span class="text-sm text-base-content/70 leading-snug pb-1">predicted win chance against decks {them ? model.field.where.replace("your", "their") : model.field.where}, if card levels were equal</span>
   </div>
 
   <div>

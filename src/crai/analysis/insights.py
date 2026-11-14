@@ -467,14 +467,23 @@ def elixir_standing(a: Analyzer, items: list[Game]) -> dict[str, Any]:
     }
 
 
-def _trophy_range(items: list[Game]) -> tuple[str, int, int] | None:
-    """The player's kind of battle (ladder or ranked) and the trophy range around them."""
-    latest = next((g for g in items if g["starting_trophies"]), None)
-    if latest is None:
+type TrophyRange = tuple[str, int | None, int | None]
+
+
+def _trophy_range(items: list[Game]) -> TrophyRange | None:
+    """The kind of battle the player is playing now (their newest game) and the trophy range
+    around them in it. Ranked (Path of Legends) battles carry no trophies: the range is then
+    everyone in ranked, never their old ladder trophies (a ranked player compared with ladder
+    players gets the wrong field)."""
+    if not items or not items[0]["battle_type"]:
         return None
+    kind = items[0]["battle_type"]
+    latest = next((g for g in items if g["battle_type"] == kind and g["starting_trophies"]), None)
+    if latest is None:
+        return (kind, None, None) if kind == "pathOfLegend" else None
     level = latest["starting_trophies"]
     band = max(200, level * NEAR_TROPHIES_SHARE)
-    return latest["battle_type"], round(level - band), round(level + band)
+    return kind, round(level - band), round(level + band)
 
 
 def _near_stat[T](a: Analyzer, key: Hashable, items: list[Game], fn: Callable[[], T]) -> T:
@@ -486,11 +495,11 @@ def _near_stat[T](a: Analyzer, key: Hashable, items: list[Game], fn: Callable[[]
     """
     scope = _trophy_range(items)
 
-    def fits(cached: tuple[tuple[str, int, int] | None, T]) -> bool:
+    def fits(cached: tuple[TrophyRange | None, T]) -> bool:
         was = cached[0]
-        if was is None or scope is None:
+        if was is None or scope is None or None in (*was[1:], *scope[1:]):
             return was == scope
-        moved = abs((was[1] + was[2]) - (scope[1] + scope[2])) / 2
+        moved = abs((was[1] + was[2]) - (scope[1] + scope[2])) / 2  # ty: ignore[unsupported-operator]
         return was[0] == scope[0] and moved <= STICKY_TROPHIES
 
     return a._field_cached(key, lambda: (scope, fn()), fits)[1]
@@ -502,9 +511,20 @@ def near_player(decks: pl.DataFrame, items: list[Game]) -> pl.DataFrame | None:
     if found is None:
         return None
     kind, low, high = found
+    if low is None or high is None:  # ranked: everyone in it
+        return decks.filter(pl.col("battle_type") == kind)
     return decks.filter(
         pl.col("battle_type") == kind, pl.col("starting_trophies").is_between(low, high)
     )
+
+
+def near_decks(a: Analyzer, items: list[Game]) -> pl.DataFrame | None:
+    """`near_player` over everyone's decks. Ranked is everyone in ranked, the same for every
+    ranked player: one cached view (grown as battles arrive), not a fresh copy per step."""
+    found = _trophy_range(items)
+    if found is not None and found[1] is None:
+        return a.decks(Filters(battle_types=(found[0],)))
+    return near_player(a.decks(), items)
 
 
 def near_filters(items: list[Game]) -> Filters | None:
@@ -523,6 +543,8 @@ def trophy_scope(items: list[Game]) -> str:
         return "all players"
     kind, low, high = found
     where = "on ladder" if kind == "trail" else "in ranked"
+    if low is None or high is None:
+        return f"players {where}, like this player"
     return f"players {where} at {low:,}-{high:,} trophies, like this player"
 
 
@@ -553,7 +575,7 @@ def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game], n_special
 
     def pick() -> Family:
         # Players at their trophies first: a much smaller table to compare decks in.
-        field = near_player(a.decks(), items)
+        field = near_decks(a, items)
         near = alike(field) if field is not None else None
         is_near = near is not None and near.height >= MIN_FAMILY_DECKS
         pool = near if is_near and near is not None else alike(a.decks())
@@ -621,7 +643,7 @@ class SwapField:
         def build() -> pl.DataFrame:
             if not near:
                 return self._alike(self._a.decks())
-            field = near_player(self._a.decks(), self._items)
+            field = near_decks(self._a, self._items)
             return self._alike(field) if field is not None else pl.DataFrame()
 
         return _near_stat(self._a, key, self._items, build)
@@ -1495,7 +1517,7 @@ def signature_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] |
         return None
 
     def card_rates() -> pl.DataFrame:
-        field = near_player(a.decks(), items)
+        field = near_decks(a, items)
         if field is None or field.height < MIN_FAMILY_DECKS:
             field = a.decks()
         # One yes/no column per card rather than a row per card: exploding the field would
@@ -1543,7 +1565,7 @@ def unique_deck(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | No
     mine = _ids(key)
 
     def count() -> tuple[int, int]:
-        field = near_player(a.decks(), items)
+        field = near_decks(a, items)
         assert field is not None  # scope is known
         # Two columns, not a copy of every column.
         others = field.select("player_tag", s=shared_cards(mine)).filter(

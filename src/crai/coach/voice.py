@@ -230,13 +230,13 @@ def found(name: str | None, battles: int | None, them: bool) -> str:
     return f"Found {who}. Reading {battles} recent battles…"
 
 
-def model_pick(m: dict[str, Any] | None) -> str | None:
+def model_pick(m: dict[str, Any] | None, where: str = "at your trophies") -> str | None:
     """Rook's line for the deck model's own suggestion, with what battle data says about it."""
     if not m:
         return None
     swaps = " and ".join(f"{_as_played(x['out'])} for {_as_played(x['in'])}" for x in m["steps"])
     head = (
-        f"Swap {swaps}. Against the decks at your trophies, my model has you at "
+        f"Swap {swaps}. Against the decks {where}, my model has you at "
         f"{_pct(m['win'])} now and {_pct(m['win_after'])} after: about {m['gain']:.1f} more "
         "wins per 100."
     )

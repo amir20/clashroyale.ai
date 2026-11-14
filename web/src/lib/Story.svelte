@@ -299,7 +299,7 @@
                 <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each pick.in as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
                 <div class="col-span-3 text-center">
                   <div class="stat-num text-2xl"><span class="text-base-content/60">{Math.round(pick.win * 100)}%</span> → <span class="text-success">{Math.round(pick.win_after * 100)}%</span></div>
-                  <div class="text-xs text-base-content/60">predicted win chance at {your} trophies · {per100(pick.gain)} wins per 100</div>
+                  <div class="text-xs text-base-content/60">predicted win chance {them ? report.model?.field.where.replace("your", "their") : report.model?.field.where} · {per100(pick.gain)} wins per 100</div>
                 </div>
               </div>
               <div class="text-sm grid gap-1.5" data-testid="model-why">

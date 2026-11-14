@@ -241,3 +241,15 @@ def test_a_lean_analyzer_holds_the_deck_table_once(db_path: Path) -> None:
     assert lean.decks().height == full.decks().height
     ranked = Filters(battle_types=("pathOfLegend",))
     assert lean.decks(ranked).height == full.decks(ranked).height
+
+
+def test_a_ranked_player_is_compared_with_ranked_players() -> None:
+    """Ranked battles carry no trophies: the newest game decides, not an old ladder game."""
+    ranked = {"battle_type": "pathOfLegend", "starting_trophies": None}
+    ladder = {"battle_type": "trail", "starting_trophies": 9000}
+    assert insights._trophy_range([ranked, ranked, ladder]) == ("pathOfLegend", None, None)  # type: ignore[list-item]
+    found = insights._trophy_range([ladder, ranked])  # type: ignore[list-item]
+    assert found is not None
+    kind, low, high = found
+    assert kind == "trail" and low is not None and high is not None and low < 9000 < high
+    assert "in ranked" in insights.trophy_scope([ranked])  # type: ignore[list-item]

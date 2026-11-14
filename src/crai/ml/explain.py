@@ -112,7 +112,7 @@ class Field:
 
 def field_for(a: Analyzer, model: Model, items: list[insights.Game]) -> Field | None:
     def build() -> Field | None:
-        decks = insights.near_player(a.decks(), items)
+        decks = insights.near_decks(a, items)
         near = decks is not None and decks.height >= MIN_FIELD_DECKS
         if not near:
             decks = a.decks()
@@ -576,6 +576,8 @@ def report(
     replayed = replay(a, model, tag, items, mine, alt, cards)
     view = deck_view(model, f, mine, cards)
     view["field"]["scope"] = insights.trophy_scope(items) if f.near else "all players"
+    ranked = f.near and items[0]["battle_type"] == "pathOfLegend"
+    view["field"]["where"] = "in ranked" if ranked else "at your trophies" if f.near else "overall"
     return view | {"pick": pick, "replay": replayed, "about": about(model)}
 
 

@@ -157,7 +157,7 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
                         "step": "found",
                         "progress": 24,
                         "message": voice.found(profile.get("name"), len(battles), them),
-                        "player": svc.player_card(tag, profile),
+                        "player": svc.player_card(tag, profile, battles),
                     }
                 )
                 await wake()  # the warm-up holds the snapshot while it reads it

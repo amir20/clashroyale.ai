@@ -12,6 +12,8 @@
   let status = $state("");
   let progress = $state(0);
   let who = $state<LoadingPlayer | null>(null); // the player being loaded, once known
+  // Path of Legends leagues, by number.
+  const LEAGUES = ["Challenger I", "Challenger II", "Challenger III", "Master I", "Master II", "Master III", "Champion", "Grand Champion", "Royal Champion", "Ultimate Champion"];
   let error = $state("");
   let shaking = $state(false);
   let tag = $state("");
@@ -158,12 +160,18 @@
               {#if who.level}<span class="shrink-0 rounded-lg bg-accent/20 text-accent text-xs font-semibold px-2 py-1">Level {who.level}</span>{/if}
             </div>
             <div class="grid grid-cols-3 gap-2 mt-3 text-center">
-              <div><div class="stat-num text-lg text-primary">{who.trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Trophies</div></div>
-              <div><div class="stat-num text-lg">{who.best_trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Best</div></div>
+              {#if who.mode === "pathOfLegend"}
+                <div><div class="stat-num text-lg text-primary">{who.league ? LEAGUES[who.league - 1] ?? `League ${who.league}` : "Ranked"}</div><div class="text-[11px] text-base-content/60">Ranked league</div></div>
+                <div><div class="stat-num text-lg">{who.rank ? `#${who.rank.toLocaleString()}` : who.rating ? who.rating.toLocaleString() : "—"}</div><div class="text-[11px] text-base-content/60">{who.rank ? "Rank" : "Rating"}</div></div>
+              {:else}
+                <div><div class="stat-num text-lg text-primary">{who.trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Trophies</div></div>
+                <div><div class="stat-num text-lg">{who.best_trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Best</div></div>
+              {/if}
               <div><div class="stat-num text-lg">{who.wins != null && who.battles ? `${Math.round((who.wins / who.battles) * 100)}%` : "—"}</div><div class="text-[11px] text-base-content/60">{who.wins != null ? `${who.wins.toLocaleString()} wins` : "Wins"}</div></div>
             </div>
             {#if who.deck.length}
-              <div class="grid grid-cols-8 gap-1 mt-3" aria-label="Current deck">
+              <div class="text-[11px] text-base-content/50 mt-3">{who.mode === "pathOfLegend" ? "Ranked deck" : who.mode === "trail" ? "Trophy Road deck" : "Latest deck"}</div>
+              <div class="grid grid-cols-8 gap-1 mt-1" aria-label="Latest deck">
                 {#each who.deck as c, i (i)}
                   {#if c.icon}<img src={c.icon} alt={c.name ?? ""} class="w-full" loading="lazy" />{:else}<div class="aspect-[5/6] rounded bg-base-300"></div>{/if}
                 {/each}

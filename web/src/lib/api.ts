@@ -29,7 +29,7 @@ export type ModelView = {
   weak: (Played & { share: number; effect: number })[];
   synergy: { cards: Played[]; effect: number }[];
   clash: { cards: Played[]; effect: number }[];
-  field: { decks: number; near: boolean; scope: string };
+  field: { decks: number; near: boolean; scope: string; where: string };
   /** The player's last opponents, played again on paper with their deck and the suggested one. */
   replay: {
     games: number;
@@ -123,7 +123,11 @@ export type LoadingPlayer = {
   three_crowns: number | null;
   clan: string | null;
   arena: string | null;
-  deck: { name: string | null; icon: string | null }[];
+  mode: string | null; // their newest battle's: "pathOfLegend" (ranked), "trail" (ladder), ...
+  league: number | null; // ranked league this season, 1-10
+  rating: number | null;
+  rank: number | null;
+  deck: { name: string | null; icon: string | null }[]; // from their newest battle
 };
 export type LoadEvent =
   | { type: "status"; step: string; message: string; progress?: number; known?: boolean; player?: LoadingPlayer | null }

@@ -135,20 +135,36 @@ class Service:
             ).fetchone()
         return bool(row and row[0])
 
-    def player_card(self, tag: str, profile: Any = None) -> dict[str, Any] | None:
-        """Who's being loaded, for the loading screen: from the profile just fetched, or the one
-        stored. Their deck only comes with a fresh profile."""
+    def player_card(
+        self, tag: str, profile: Any = None, battles: list[Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Who's being loaded, for the loading screen: from the profile and battles just fetched,
+        or the ones stored. The deck is the one from their newest battle: the profile's
+        `currentDeck` is whichever deck is selected in the game, maybe for another mode."""
         if profile is not None:
             clan = profile.get("clan") or {}
             arena = profile.get("arena") or {}
+            pol = profile.get("currentPathOfLegendSeasonResult") or {}
+            newest = next(
+                (
+                    b
+                    for b in battles or []
+                    if len(b.get("team") or []) == 1
+                    and (b.get("deckSelection") or "collection") == "collection"
+                ),
+                None,
+            )
+            cards = (newest["team"][0].get("cards") if newest else None) or profile.get(
+                "currentDeck"
+            )
             deck = []
-            for c in profile.get("currentDeck") or []:
+            for c in cards or []:
                 icons, level = c.get("iconUrls") or {}, c.get("evolutionLevel") or 0
                 icon = (icons.get("heroMedium") if level & 2 else None) or (
                     icons.get("evolutionMedium") if level & 1 else None
                 )
                 deck.append({"name": c.get("name"), "icon": icon or icons.get("medium")})
-            row = {
+            return {
                 "name": profile.get("name"),
                 "level": profile.get("expLevel"),
                 "trophies": profile.get("trophies"),
@@ -158,20 +174,49 @@ class Service:
                 "three_crowns": profile.get("threeCrownWins"),
                 "clan": clan.get("name"),
                 "arena": arena.get("name"),
+                "mode": newest.get("type") if newest else None,
+                "league": pol.get("leagueNumber"),
+                "rating": pol.get("trophies"),
+                "rank": pol.get("rank"),
+                "deck": deck,
             }
-            return row | {"deck": deck}
         if not self.settings.db_path.exists():
             return None
         with db.session(self.settings.db_path, read_only=True) as conn:
             r = conn.execute(
                 """SELECT name, exp_level, trophies, best_trophies, wins, battle_count,
-                          three_crown_wins, clan_name, arena FROM players WHERE tag = ?""",
+                          three_crown_wins, clan_name, arena, pol_league, pol_trophies, pol_rank
+                   FROM players WHERE tag = ?""",
                 (tag,),
             ).fetchone()
+            newest = conn.execute(
+                """SELECT b.id, b.battle_type FROM battle_participants bp
+                   JOIN battles b ON b.id = bp.battle_id
+                   WHERE bp.player_tag = ? AND b.team_size = 1
+                     AND coalesce(b.deck_selection, 'collection') = 'collection'
+                   ORDER BY b.battle_time DESC LIMIT 1""",
+                (tag,),
+            ).fetchone()
+            deck = []
+            if newest:
+                for name, level, icon, evo, hero in conn.execute(
+                    """SELECT c.name, coalesce(pc.evolution_level, 0), c.icon_url,
+                              c.evo_icon_url, c.hero_icon_url
+                       FROM participant_cards pc JOIN cards c ON c.id = pc.card_id
+                       WHERE pc.battle_id = ? AND pc.player_tag = ? AND pc.kind = 'deck'
+                       ORDER BY pc.slot""",
+                    (newest[0], tag),
+                ):
+                    form = (hero if level & 2 else None) or (evo if level & 1 else None)
+                    deck.append({"name": name, "icon": form or icon})
         if r is None or r[0] is None:
             return None
         keys = ("name", "level", "trophies", "best_trophies", "wins", "battles", "three_crowns")
-        return dict(zip((*keys, "clan", "arena"), r, strict=True)) | {"deck": []}
+        keys += ("clan", "arena", "league", "rating", "rank")
+        return dict(zip(keys, r, strict=True)) | {
+            "mode": newest[1] if newest else None,
+            "deck": deck,
+        }
 
     def store(self, profile: Any, battles: list[Any], tag: str) -> int:
         laps = Laps()
@@ -215,7 +260,9 @@ class Service:
         story = self.story(tag, items, laps)
         with laps.lap("model"):
             model = self.model(tag, items, story["replace"])
-        story["lines"]["pick"] = voice.model_pick(model["pick"]) if model else None
+        story["lines"]["pick"] = (
+            voice.model_pick(model["pick"], model["field"]["where"]) if model else None
+        )
         with laps.lap("cards"):
             cards = insights.playable_cards(a)
         log.info("report %s in %.2fs (%s)", tag, laps.total, laps)
