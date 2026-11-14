@@ -608,18 +608,30 @@ class SwapField:
         return (
             d.filter(pl.col("player_tag") != self._tag)
             .with_columns(shared=shared_cards(self._others))
-            .filter(pl.col("shared") >= 4, special_count() == self._n_special)
+            .filter(pl.col("shared") >= min(len(self._others), CLOSE_SHARED_CARDS))
+            .filter(special_count() == self._n_special)  # after: parsing specials is slower
         )
+
+    def _pool(self, near: bool) -> pl.DataFrame:
+        """Small once filtered, but finding them scans every deck: kept like the family is."""
+        key = ("swap_pool", self._tag, tuple(sorted(self._others)), self._n_special, near)
+
+        def build() -> pl.DataFrame:
+            if not near:
+                return self._alike(self._a.decks())
+            field = near_player(self._a.decks(), self._items)
+            return self._alike(field) if field is not None else pl.DataFrame()
+
+        return _near_stat(self._a, key, self._items, build)
 
     def pools(self) -> Iterator[tuple[pl.DataFrame, bool]]:
         """Near the player's trophies first, then at every trophy level (built only if needed)."""
         if self._near is None:
-            field = near_player(self._a.decks(), self._items)
-            self._near = self._alike(field) if field is not None else pl.DataFrame()
+            self._near = self._pool(near=True)
         if self._near.height:
             yield self._near, True
         if self._all is None:
-            self._all = self._alike(self._a.decks())
+            self._all = self._pool(near=False)
         yield self._all, False
 
     def compare(self, out_id: int, in_id: int, slot: int) -> HeadToHead:
@@ -632,14 +644,20 @@ class SwapField:
         """
         has_out, has_in = (pl.col("cards").list.contains(c) for c in (out_id, in_id))
         top = len(self._others)
+        floor = min(top, CLOSE_SHARED_CARDS)  # fewer shared cards is another deck, not a swap
         chosen = None
-        for needed in range(top, 3, -1):
-            for pool, near in self.pools():
-                p = pool.filter(has_out != has_in, pl.col("shared") >= needed)
-                sides = (p.filter(plays(out_id, slot)), p.filter(plays(in_id, slot)))
-                if chosen is None or min(s.height for s in sides) >= MIN_SWAP_GAMES:
+        for pool, near in self.pools():  # near first: far smaller, and the full one is costly
+            one = pool.filter(has_out != has_in, pl.col("shared") >= floor)
+            one = one.with_columns(is_out=plays(out_id, slot), is_in=plays(in_id, slot))
+            for needed in range(top, floor - 1, -1):
+                p = one.filter(pl.col("shared") >= needed)
+                sides = (p.filter("is_out"), p.filter("is_in"))
+                fewest = min(s.height for s in sides)
+                enough = fewest >= MIN_SWAP_GAMES
+                # Without enough anywhere, show the closest it got (the most games a side).
+                if chosen is None or enough or fewest > min(s.height for s in chosen[1]):
                     chosen = (p, sides, near, needed)
-                if min(s.height for s in sides) >= MIN_SWAP_GAMES:
+                if enough:
                     break
             else:
                 continue

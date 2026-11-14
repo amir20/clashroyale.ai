@@ -98,3 +98,17 @@ def test_other_changes_and_weak_spots_are_reported(tmp_path: Path) -> None:
     assert [c["id"] for c in view["watch_out"]] == [SKARMY]
     line = voice.swap_caveats(m | {"match": m, "watch_out": view["watch_out"]})
     assert "Cannon for Mega Knight" in line and "Skeleton Army" in line
+
+
+def test_decks_that_changed_half_the_cards_are_not_a_swap(tmp_path: Path) -> None:
+    """Sharing only 4 of the other 7 cards is a different deck: no verdict."""
+    keep = swap(CYCLE, CANNON, XBOW)
+    far = swap(swap(swap(swap(CYCLE, MUSKETEER, PEKKA), CANNON, MK), KNIGHT, SKARMY), HOG, XBOW)
+    a = build(
+        tmp_path / "f.db",
+        [(keep, OPP_PLAIN, k < 40) for k in range(150)]
+        + [(far, OPP_PLAIN, True) for _ in range(150)],
+    )
+    view = visuals.swap_view(a, ME, insights.games(a, ME), "musketeer", "pekka")
+    assert view["verdict"] == "unknown"
+    assert view["in"]["games"] == 0
