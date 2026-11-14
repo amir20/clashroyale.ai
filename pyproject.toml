@@ -30,6 +30,10 @@ dev = [
     "ruff>=0.17.4",
     "ty>=0.0.99",
 ]
+ml = [
+    "numpy>=2.5.4",
+    "torch>=2.15.0",
+]
 
 [tool.ruff]
 line-length = 100
@@ -55,6 +59,12 @@ ignore = [
 
 [tool.ty.environment]
 python-version = "3.15"
+
+[[tool.ty.overrides]]
+# torch and numpy come with the optional `ml` group, which CI and the server image don't install.
+include = ["src/crai/ml/model.py", "src/crai/ml/train.py"]
+[tool.ty.overrides.rules]
+import-not-found = "ignore"
 
 [tool.ty.rules]
 possibly-unresolved-reference = "error"

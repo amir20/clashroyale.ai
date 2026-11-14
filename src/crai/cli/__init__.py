@@ -2,7 +2,7 @@
 
 import sys
 
-from crai.cli import data_commands, question_commands, server_commands  # noqa: F401
+from crai.cli import data_commands, ml_commands, question_commands, server_commands  # noqa: F401
 from crai.cli.app import app
 
 
