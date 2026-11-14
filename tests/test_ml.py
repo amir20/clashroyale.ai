@@ -87,3 +87,28 @@ def test_by_player_tests_only_unseen_players(four_days: Path, tmp_path: Path) ->
     tested = set(parts["test"]["pa"]) | set(parts["test"]["pb"])
     assert not seen & tested  # nobody tested was ever trained on
     assert {k: len(s) for k, s in splits.items()} == {k: p.height for k, p in parts.items()}
+
+
+def test_the_published_baseline_predicts_the_same(four_days: Path, tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    from crai.ml import explain  # noqa: PLC0415
+    from crai.ml.model import Baseline  # noqa: PLC0415 - torch is optional
+    from crai.ml.publish import publish  # noqa: PLC0415
+    from crai.ml.train import load, train  # noqa: PLC0415
+
+    data, ckpt = tmp_path / "ml" / "battles.parquet", tmp_path / "ml" / "baseline.pt"
+    export(four_days, data, days=0)
+    train(data, ckpt, "baseline", epochs=5, batch=64, lr=0.05, l2=0.01)
+    about = publish(ckpt, data, tmp_path / "ml" / "model.json")
+    assert 0 <= about["accuracy"] <= 1
+    model = explain.load(tmp_path / "ml" / "model.json")
+    assert model is not None
+    net = Baseline(len(model.card))
+    net.load_state_dict(torch.load(ckpt)["state"])
+    test = load(data)[0]["test"]
+    a, b = test.a[:5].long(), test.b[:5].long()
+    want = net(a, b, test.ctx[:5].long(), torch.zeros(5, 2)).tolist()
+    for i in range(5):
+        da, db = a[i].tolist(), b[i].tolist()
+        got = model.own(da) - model.own(db) + sum(model.counter(x, y) for x in da for y in db)
+        assert got == pytest.approx(want[i], abs=1e-3)  # weights are rounded to 5 decimals

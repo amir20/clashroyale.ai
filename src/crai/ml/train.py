@@ -142,6 +142,7 @@ def train(
     lr: float = 2e-3,
     dim: int = 64,
     by: str = "day",
+    l2: float = 0.0,
 ) -> dict[str, Scores]:
     dev = device()
     splits, vocab_size = load(data, by)
@@ -171,6 +172,8 @@ def train(
             if torch.rand(()) < 0.5:  # either side first: the model must not care
                 a, b, x, y = b, a, -x, 1 - y
             loss = loss_fn(model(a, b, tr.ctx[idx].to(dev).long(), x.to(dev)), y.to(dev))
+            if l2 and isinstance(model, Baseline):
+                loss = loss + l2 * model.penalty(a, b)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()

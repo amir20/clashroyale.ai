@@ -18,6 +18,7 @@ from crai.analysis.analytics import Analyzer
 from crai.coach import voice
 from crai.collect.client import ClashClient
 from crai.config import Settings
+from crai.ml import explain
 from crai.storage import database as db
 from crai.timing import Laps
 
@@ -168,6 +169,8 @@ class Service:
         with laps.lap("similar"):
             similar = insights.similar_battles(a, tag, items) if items else None
         story = self.story(tag, items, laps)
+        with laps.lap("model"):
+            model = self.model(tag, items, story["replace"])
         with laps.lap("cards"):
             cards = insights.playable_cards(a)
         log.info("report %s in %.2fs (%s)", tag, laps.total, laps)
@@ -179,12 +182,28 @@ class Service:
             "patterns": patterns,
             "patterns_line": voice.wins_and_losses(patterns),
             "story": story,
+            "model": model,
             "cards": cards,
             "questions": [{"id": k, "label": v} for k, v in QUESTIONS.items()],
             "custom_questions_per_day": DAILY_QUESTIONS,
             "ai_enabled": bool(self.settings.openrouter_key),
             "dev": self.settings.dev,
         }
+
+    @property
+    def model_path(self) -> Path:
+        return self.settings.db_path.parent / "ml" / "model.json"
+
+    def model(
+        self, tag: str, items: list[insights.Game], replace: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The deck model's view, adding its verdict to each suggested swap. A broken or missing
+        model leaves the rest of the report alone."""
+        try:
+            return explain.report(self.analyzer, self.model_path, tag, items, replace)
+        except Exception:
+            log.exception("deck model failed for %s", tag)
+            return None
 
     def story(self, tag: str, items: list[insights.Game], laps: Laps) -> dict[str, Any]:
         """The swipeable cards, computed with no AI call. A card with no data is None."""
@@ -235,6 +254,7 @@ class Service:
                 voice.replace_card,
                 "which_card_to_replace",
             )
+            self.model(tag, items, data)  # adds the model's verdict to each swap
         elif question == "best_cards":
             data, line, tool = (
                 insights.best_cards(a, items),

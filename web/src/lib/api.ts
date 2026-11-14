@@ -10,6 +10,40 @@ export type Battle = {
   trophy_change: number | null;
   opponent: { tag: string; name: string | null; trophies: number | null; deck: PlayedCard[] };
 };
+type Played = PlayedCard & { status?: "evolution" | "hero" | "both" | null };
+/** The deck model's verdict on a swap: win chance after it, change in wins per 100, and why. */
+export type ModelVerdict = {
+  win: number;
+  gain: number;
+  parts: { alone: number; synergy: number; matchups: number };
+  reasons: (
+    | { kind: "synergy"; how: "gained" | "lost"; cards: Played[]; effect: number }
+    | { kind: "matchup"; card: Played; share: number; effect: number }
+  )[];
+};
+/** The deck model's view of the player's deck against the decks at their trophies. */
+export type ModelView = {
+  win: number;
+  cards: (Played & { total: number; alone: number; synergy: number; matchups: number })[];
+  strong: (Played & { share: number; effect: number })[];
+  weak: (Played & { share: number; effect: number })[];
+  synergy: { cards: Played[]; effect: number }[];
+  clash: { cards: Played[]; effect: number }[];
+  field: { decks: number; near: boolean; scope: string };
+  about: {
+    published: string;
+    battles: number;
+    first_day: string;
+    test_day: string;
+    test_battles: number;
+    accuracy: number;
+    auc: number;
+    calibration: number;
+    strength_accuracy: number;
+    pairs: number;
+    matchups: number;
+  };
+};
 export type Report = {
   overview: {
     player: { tag: string; name: string; trophies: number | null; clan: string | null; arena: string | null };
@@ -33,6 +67,7 @@ export type Report = {
     elixir_leaked_losses: number | null;
   };
   patterns_line: string;
+  model: ModelView | null;
   story: {
     trend: any | null;
     close: any | null;

@@ -62,7 +62,7 @@ python-version = "3.15"
 
 [[tool.ty.overrides]]
 # torch and numpy come with the optional `ml` group, which CI and the server image don't install.
-include = ["src/crai/ml/model.py", "src/crai/ml/train.py"]
+include = ["src/crai/ml/model.py", "src/crai/ml/train.py", "src/crai/ml/publish.py"]
 [tool.ty.overrides.rules]
 import-not-found = "ignore"
 

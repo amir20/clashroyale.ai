@@ -3,7 +3,9 @@
   import { fly } from "svelte/transition";
   import type { Battle, Card, Report } from "./api";
   import CardTile from "./CardTile.svelte";
+  import HowItWorks from "./HowItWorks.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import ModelCard from "./ModelCard.svelte";
   import Rook from "./Rook.svelte";
   import Visual from "./Visual.svelte";
 
@@ -38,6 +40,7 @@
     "you",
     ...(s.surprises?.length && !them ? ["wow"] : []),
     ...(o.deck.length ? ["deck"] : []),
+    ...(report.model ? ["model"] : []),
     ...(report.battles?.length ? ["battles"] : []),
     ...(s.trend ? ["trend"] : []),
     ...(s.close ? ["close"] : []),
@@ -88,6 +91,7 @@
     you: "Overview",
     wow: "Surprises",
     deck: "Deck",
+    model: "Deck",
     battles: "Battles",
     trend: "Form",
     close: "Close games",
@@ -97,6 +101,11 @@
     goals: "Next steps",
   };
   const sections = $derived(Array.from({ length: Math.ceil(slides.length / 2) }, (_, i) => slides.slice(i * 2, i * 2 + 2)));
+
+  let how = $state(false); // the "how Rook predicts" sheet
+  const per100 = (x: number) => `${x > 0 ? "+" : ""}${x.toFixed(1)}`;
+  const named = (c: { name: string; status?: string | null }) =>
+    c.name + (c.status === "evolution" ? " (Evo)" : c.status === "hero" ? " (Hero)" : c.status === "both" ? " (Evo + Hero)" : "");
 
   let index = $state(0);
   let direction = $state(1);
@@ -129,7 +138,7 @@
   }
 
   function key(e: KeyboardEvent) {
-    if (!active || wide || document.querySelector("[data-testid=card-sheet]")) return;
+    if (!active || wide || how || document.querySelector("[data-testid=card-sheet]")) return;
     if (e.key === "ArrowRight") go(index + 1);
     if (e.key === "ArrowLeft") go(index - 1);
   }
@@ -251,6 +260,9 @@
               {#each o.deck as c (c.id)}{@render tile(c, c.name, c.status)}{/each}
             </div>
             <p class="text-sm text-base-content/70">{onCard ? `${wide ? "Click" : "Tap"} any card to find out more.` : `${o.avg_elixir} average elixir.`}</p>
+          {:else if id === "model" && report.model}
+            <h2 class="text-2xl lg:text-3xl">How {your} deck stacks up</h2>
+            <ModelCard model={report.model} {them} {onCard} onHow={() => (how = true)} />
           {:else if id === "battles"}
             <h2 class="text-2xl lg:text-3xl">Recent battles</h2>
             <ul class="grid gap-2.5" data-testid="battles">
@@ -286,6 +298,29 @@
                 <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks built on your core</span></div>
                 {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
               </div>
+              {#if swap.model}
+                {@const m = swap.model}
+                {@const agrees = (m.gain > 0) === (swap.gain > 0)}
+                <div class="rounded-xl border border-base-content/10 p-3 text-sm" data-testid="model-verdict" data-agrees={agrees}>
+                  <div class="flex items-baseline justify-between gap-2">
+                    <span class="font-semibold">Rook's model {agrees ? "agrees" : "isn't convinced"}</span>
+                    <span class="stat-num {m.gain >= 0 ? 'text-success' : 'text-error'}">{per100(m.gain)}<span class="text-xs font-normal text-base-content/60"> per 100</span></span>
+                  </div>
+                  <ul class="mt-1.5 text-xs text-base-content/70 grid gap-1">
+                    {#each m.reasons as r, i (i)}
+                      <li>
+                        {#if r.kind === "synergy"}
+                          {r.how === "gained" ? "Gains" : "Loses"} {r.cards.map(named).join(" + ")} working together ({per100(r.effect)})
+                        {:else}
+                          {r.effect > 0 ? "Better" : "Worse"} against {named(r.card)}, in {Math.round(r.share * 100)}% of decks ({per100(r.effect)})
+                        {/if}
+                      </li>
+                    {/each}
+                    <li class="text-base-content/50">Cards on their own {per100(m.parts.alone)} · together {per100(m.parts.synergy)} · matchups {per100(m.parts.matchups)}</li>
+                  </ul>
+                  <button class="mt-1.5 text-xs link link-primary cursor-pointer" onclick={() => (how = true)}>How does the model work?</button>
+                </div>
+              {/if}
             {:else if weak}
               <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-1 items-center gap-3">
                 <div class="w-20 mx-auto">{@render tile(weak, weak.name)}</div>
@@ -322,6 +357,10 @@
             </p>
           {/if}
 {/snippet}
+
+{#if how && report.model}
+  <HowItWorks about={report.model.about} onClose={() => (how = false)} />
+{/if}
 
 {#if wide}
   <div class="fixed inset-0 z-20 bg-base-100 overflow-y-auto" in:fly={{ y: 700, duration: 420, easing: cubicOut }} data-testid="dashboard">

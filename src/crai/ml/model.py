@@ -40,14 +40,31 @@ class Baseline(nn.Module):
         self.register_buffer("i", i, persistent=False)
         self.register_buffer("j", j, persistent=False)
 
+    def _pairs(self, a: Tensor) -> Tensor:  # the 28 pairs in deck a, as weight indices
+        return (a[:, self.i] * self.vocab_size + a[:, self.j]) % self.HASH
+
+    def _cross(self, a: Tensor, b: Tensor) -> Tensor:  # the 64 (a card, b card) matchups
+        return (a.unsqueeze(2) * self.vocab_size + b.unsqueeze(1)).flatten(1) % self.HASH
+
     def _score(self, a: Tensor, b: Tensor) -> Tensor:
         real = (a != PAD).float()
         cards = (self.card(a).squeeze(-1) * real).sum(1)
-        pa, pb = a[:, self.i], a[:, self.j]  # the 28 pairs in deck a
-        pairs = self.pair((pa * self.vocab_size + pb) % self.HASH).squeeze(-1).sum(1)
-        cross = a.unsqueeze(2) * self.vocab_size + b.unsqueeze(1)  # 64 matchups
-        vs = self.vs(cross.flatten(1) % self.HASH).squeeze(-1).sum(1)
+        pairs = self.pair(self._pairs(a)).squeeze(-1).sum(1)
+        vs = self.vs(self._cross(a, b)).squeeze(-1).sum(1)
         return cards + pairs + vs
+
+    def penalty(self, a: Tensor, b: Tensor) -> Tensor:
+        """Squared pair and matchup weights in this batch. Shrinking them toward zero keeps what a
+        card does on its own in the card's weight, so pairs only say what's extra: synergy, and
+        counters. That's what makes the weights readable as reasons."""
+        w = torch.cat(
+            [
+                self.pair(torch.cat([self._pairs(a), self._pairs(b)], 1)),
+                self.vs(torch.cat([self._cross(a, b), self._cross(b, a)], 1)),
+            ],
+            1,
+        )
+        return w.square().sum((1, 2)).mean()
 
     def forward(self, a: Tensor, b: Tensor, ctx: Tensor, x: Tensor) -> Tensor:
         return self._score(a, b) - self._score(b, a) + self.strength(x).squeeze(-1)

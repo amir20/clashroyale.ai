@@ -1,0 +1,316 @@
+"""The deck model on the server: predicted win chance, and why, from `model.json` (no torch).
+
+The model (see crai.ml.model.Baseline) scores a battle as a sum of weights:
+
+    logit(A beats B) = own(A) - own(B) + sum over a in A, b in B of counter(a, b)
+    own(D)           = sum of card weights + sum of the 28 pair weights (synergy)
+    counter(a, b)    = vs(a, b) - vs(b, a)
+
+Against "the decks you face" (a sample of decks near the player's trophies, with equal card
+levels and trophies), the average logit splits exactly into one share per card:
+
+    share(a) = alone(a) + synergy(a) + matchups(a)
+    alone(a)    = card(a) - the average card weight in those decks
+    synergy(a)  = half of a's pair weights with the other 7 - the average deck's, per card
+    matchups(a) = average over the decks of sum over b of counter(a, b)
+
+The shares add up to the deck's edge, so each card's bar says how much it adds. Shares are in
+log-odds; the page shows them as about how many wins per 100 games.
+"""
+
+import json
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from crai.analysis import insights
+from crai.analysis.analytics import Analyzer, variants
+from crai.ml.data import PAD
+
+FIELD_DECKS = 1000  # decks sampled from the player's trophy range: the decks they face
+MIN_FIELD_DECKS = 200
+MIN_CARD_SHARE = 0.05  # an opponent card shows as a strong/weak matchup if this share run it
+SHOWN = 3
+
+
+@dataclass
+class Model:
+    first: dict[int, int]  # card id -> its first token
+    card: list[float]
+    pair: dict[tuple[int, int], float]
+    vs: dict[tuple[int, int], float]
+    about: dict[str, Any]
+
+    def token(self, v: int) -> int:
+        """The token of a card as played (card id * 10 + Evolution/Hero level)."""
+        first = self.first.get(v // 10)
+        return PAD if first is None else first + v % 10
+
+    def variant(self, t: int) -> int:
+        return self._back[t]
+
+    def __post_init__(self) -> None:
+        self._back = {f + k: cid * 10 + k for cid, f in self.first.items() for k in range(4)}
+
+    def counter(self, x: int, y: int) -> float:
+        return self.vs.get((x, y), 0.0) - self.vs.get((y, x), 0.0)
+
+    def alone(self, deck: list[int]) -> float:
+        return sum(self.card[t] for t in deck if t != PAD)
+
+    def pairs(self, deck: list[int]) -> float:
+        d = sorted(deck)
+        return sum(self.pair.get((x, y), 0.0) for i, x in enumerate(d) for y in d[i + 1 :])
+
+    def own(self, deck: list[int]) -> float:
+        return self.alone(deck) + self.pairs(deck)
+
+
+_cache: dict[Path, tuple[float, Model]] = {}
+
+
+def load(path: Path) -> Model | None:
+    """The published model, reread when the file changes. None when there isn't one."""
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    hit = _cache.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    raw = json.loads(path.read_text())
+    model = Model(
+        first={int(k): v for k, v in raw["vocab"].items()},
+        card=raw["card"],
+        pair={(int(x), int(y)): w for x, y, w in raw["pair"]},
+        vs={(int(x), int(y)): w for x, y, w in raw["vs"]},
+        about=raw["about"],
+    )
+    _cache[path] = (mtime, model)
+    return model
+
+
+@dataclass
+class Field:
+    """The decks a player faces, as the model sees them."""
+
+    decks: list[list[int]]
+    own: list[float]  # each deck's own score
+    share: dict[int, float]  # token -> share of decks running it
+    card_avg: float  # the average deck's card weights, per card
+    pair_avg: float  # the average deck's pair weights, per card
+    near: bool
+
+
+def field(a: Analyzer, model: Model, items: list[insights.Game]) -> Field | None:
+    def build() -> Field | None:
+        decks = insights.near_player(a.decks(), items)
+        near = decks is not None and decks.height >= MIN_FIELD_DECKS
+        if not near:
+            decks = a.decks()
+        if decks is None or decks.height < MIN_FIELD_DECKS:
+            return None
+        sample = decks.sample(min(FIELD_DECKS, decks.height), seed=7).select(v=variants())
+        found = [[model.token(v) for v in vs] for vs in sample["v"].to_list()]
+        found = [d for d in found if len(d) == 8]
+        if len(found) < MIN_FIELD_DECKS:
+            return None
+        share: dict[int, float] = {}
+        for d in found:
+            for t in set(d):
+                share[t] = share.get(t, 0.0) + 1 / len(found)
+        return Field(
+            decks=found,
+            own=[model.own(d) for d in found],
+            share=share,
+            card_avg=sum(model.alone(d) for d in found) / len(found) / 8,
+            pair_avg=sum(model.pairs(d) for d in found) / len(found) / 8,
+            near=near,
+        )
+
+    return insights._near_stat(a, ("model_field", id(model)), items, build)
+
+
+def win_chance(model: Model, deck: list[int], f: Field) -> float:
+    """Average predicted win chance against the field, with equal levels and trophies."""
+    mine = model.own(deck)
+    total = 0.0
+    for d, own in zip(f.decks, f.own, strict=True):
+        logit = mine - own + sum(model.counter(x, y) for x in deck for y in d)
+        total += 1 / (1 + math.exp(-logit))
+    return total / len(f.decks)
+
+
+def _matchups(model: Model, t: int, f: Field) -> float:
+    return sum(s * model.counter(t, y) for y, s in f.share.items())
+
+
+def shares(model: Model, deck: list[int], f: Field) -> list[dict[str, float]]:
+    """Each card's share of the deck's edge: alone, synergy and matchups (log-odds)."""
+    out = []
+    for t in deck:
+        others = [u for u in deck if u != t]
+        syn = sum(model.pair.get((min(t, u), max(t, u)), 0.0) for u in others) / 2
+        alone = (model.card[t] if t != PAD else 0.0) - f.card_avg
+        out.append(
+            {"alone": alone, "synergy": syn - f.pair_avg, "matchups": _matchups(model, t, f)}
+        )
+    return out
+
+
+def _wins(logit: float, p: float) -> float:
+    """Log-odds as about how many wins per 100 games, near a win chance of p."""
+    return round(logit * p * (1 - p) * 100, 1)
+
+
+def _card(cards: dict[int, dict[str, Any]], model: Model, t: int) -> dict[str, Any] | None:
+    v = model.variant(t) if t != PAD else None
+    if v is None or v // 10 not in cards:
+        return None
+    return insights._played_as(cards[v // 10], v % 10)
+
+
+def deck_view(
+    model: Model, f: Field, mine: list[int], cards: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
+    deck = [model.token(v) for v in mine]
+    p = win_chance(model, deck, f)
+    parts = shares(model, deck, f)
+    rows = []
+    for t, s in zip(deck, parts, strict=True):
+        c = _card(cards, model, t)
+        if c:
+            rows.append(
+                c | {k: _wins(x, p) for k, x in s.items()} | {"total": _wins(sum(s.values()), p)}
+            )
+    rows.sort(key=lambda r: -r["total"])
+    against = []
+    for y, share in f.share.items():
+        c = _card(cards, model, y)
+        if c and share >= MIN_CARD_SHARE and y not in deck:
+            effect = sum(model.counter(x, y) for x in deck)
+            against.append(c | {"share": round(share, 3), "effect": _wins(effect, p)})
+    against.sort(key=lambda r: -r["effect"])
+    pairs: list[dict[str, Any]] = []
+    for i, x in enumerate(sorted(deck)):
+        for y in sorted(deck)[i + 1 :]:
+            w = model.pair.get((x, y), 0.0)
+            cx, cy = _card(cards, model, x), _card(cards, model, y)
+            if cx and cy and w:
+                pairs.append({"cards": [cx, cy], "effect": _wins(w, p)})
+    pairs.sort(key=lambda r: -r["effect"])
+    return {
+        "win": round(p, 3),
+        "cards": rows,
+        "strong": [r for r in against[:SHOWN] if r["effect"] > 0],
+        "weak": [r for r in against[::-1][:SHOWN] if r["effect"] < 0],
+        "synergy": [r for r in pairs[:SHOWN] if r["effect"] > 0],
+        "clash": [r for r in pairs[::-1][:1] if r["effect"] < 0],
+        "field": {"decks": len(f.decks), "near": f.near},
+    }
+
+
+def package_view(
+    model: Model,
+    f: Field,
+    mine: list[int],
+    out: list[int],
+    added: list[int],
+    cards: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """What the model says about swapping `out` for `added`, and the biggest reasons."""
+    old = [model.token(v) for v in mine]
+    gone = {model.token(v) for v in out}
+    new = [t for t in old if t not in gone] + [model.token(v) for v in added]
+    p0, p1 = win_chance(model, old, f), win_chance(model, new, f)
+    a0, a1 = shares(model, old, f), shares(model, new, f)
+    part = {k: _wins(sum(s[k] for s in a1) - sum(s[k] for s in a0), p0) for k in a0[0]}
+    reasons: list[dict[str, Any]] = []
+    # The pair that changed most: a synergy gained (new card with another) or lost.
+    kept = [t for t in old if t not in gone]
+    fresh = [t for t in new if t not in kept]
+
+    def w(t: int, u: int) -> float:
+        return model.pair.get((min(t, u), max(t, u)), 0.0)
+
+    changed = [
+        (w(t, u), t, u, "gained") for i, t in enumerate(fresh) for u in kept + fresh[i + 1 :]
+    ]
+    changed += [(-w(t, u), t, u, "lost") for t in gone for u in kept]
+    if changed:
+        effect, t, u, how = max(changed, key=lambda r: abs(r[0]))
+        ct, cu = _card(cards, model, t), _card(cards, model, u)
+        if ct and cu and abs(_wins(effect, p0)) >= 0.5:
+            reasons.append(
+                {"kind": "synergy", "cards": [ct, cu], "effect": _wins(effect, p0), "how": how}
+            )
+    # The opponent card the swap handles most differently.
+    best = None
+    for y, share in f.share.items():
+        if share < MIN_CARD_SHARE:
+            continue
+        d = share * (sum(model.counter(x, y) for x in new) - sum(model.counter(x, y) for x in old))
+        if best is None or abs(d) > abs(best[0]):
+            best = (d, y, share)
+    if best:
+        c = _card(cards, model, best[1])
+        if c and abs(_wins(best[0], p0)) >= 0.5:
+            reasons.append(
+                {
+                    "kind": "matchup",
+                    "card": c,
+                    "share": round(best[2], 3),
+                    "effect": _wins(best[0], p0),
+                }
+            )
+    return {
+        "win": round(p1, 3),
+        "gain": round((p1 - p0) * 100, 1),  # wins per 100 games
+        "parts": part,
+        "reasons": reasons,
+    }
+
+
+def about(model: Model) -> dict[str, Any]:
+    return model.about | {"pairs": len(model.pair), "matchups": len(model.vs)}
+
+
+def report(
+    a: Analyzer,
+    path: Path,
+    tag: str,
+    items: list[insights.Game],
+    replace: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The model's part of a report, adding its verdict to each swap. None without a model or
+    a current deck."""
+    model = load(path)
+    key = insights.current_deck_key(items)
+    if model is None or key is None:
+        return None
+    f = field(a, model, items)
+    if f is None:
+        return None
+    played = insights.slots(a, tag, items)
+    mine = [cid * 10 + played.get(cid, 0) for cid in insights._ids(key)]
+    cards = insights._cards(a)
+    for c in replace.get("candidates") or []:
+        c["model"] = package_view(
+            model,
+            f,
+            mine,
+            [x["id"] * 10 + _level(x) for x in c["out"]],
+            [x["id"] * 10 + _level(x) for x in c["in"]],
+            cards,
+        )
+    view = deck_view(model, f, mine, cards)
+    view["field"]["scope"] = insights.trophy_scope(items) if f.near else "all players"
+    return view | {"about": about(model)}
+
+
+LEVEL = {None: 0, "evolution": 1, "hero": 2, "both": 3}
+
+
+def _level(card: dict[str, Any]) -> int:
+    return LEVEL.get(card.get("status"), 0)

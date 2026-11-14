@@ -85,7 +85,7 @@
           {#each c.out as x (x.id)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
           <span class="text-primary" aria-hidden="true">→</span>
           {#each c.in as x (x.id)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
-          <span class="text-xs opacity-70 tabular-nums ml-auto text-right">{per100(c.gain)} {c.baseline === "core" ? "vs others with your core" : "vs yours"}<br />{c.players} players</span>
+          <span class="text-xs opacity-70 tabular-nums ml-auto text-right">{per100(c.gain)} {c.baseline === "core" ? "vs others with your core" : "vs yours"}<br />{c.players} players{#if c.model}<br /><span class={c.model.gain >= 0 ? "text-success" : "text-error"}>model {c.model.gain > 0 ? "+" : ""}{c.model.gain.toFixed(1)}</span>{/if}</span>
         </li>
       {/each}
     </ul>
