@@ -71,3 +71,19 @@ def test_the_strength_only_reference_trains(four_days: Path, tmp_path: Path) -> 
     export(four_days, data, days=0)
     scores = train(data, tmp_path / "ml" / "strength.pt", "strength", epochs=2, batch=64)
     assert 0 <= scores["test"].log_loss < 1  # equal levels and trophies: nothing to go on
+
+
+def test_by_player_tests_only_unseen_players(four_days: Path, tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    from crai.ml.train import _by_player, load  # noqa: PLC0415 - torch is optional
+
+    data = tmp_path / "ml" / "battles.parquet"
+    export(four_days, data, days=0)
+    df = pl.read_parquet(data)
+    assert ME in set(df["pa"]) | set(df["pb"])
+    splits, _ = load(data, by="player")
+    parts = {k: df.filter(f) for k, f in _by_player(df).items()}
+    seen = set(parts["train"]["pa"]) | set(parts["train"]["pb"])
+    tested = set(parts["test"]["pa"]) | set(parts["test"]["pb"])
+    assert not seen & tested  # nobody tested was ever trained on
+    assert {k: len(s) for k, s in splits.items()} == {k: p.height for k, p in parts.items()}

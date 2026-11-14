@@ -36,10 +36,13 @@ def train_cmd(
     batch: int = 4096,
     lr: float = 2e-3,
     dim: int = 64,
+    by: Annotated[
+        str, typer.Option(help="Hold out the newest day, or players never seen in training")
+    ] = "day",
 ) -> None:
-    """Train on all but the last two days; report scores on the newest (held-out) day."""
-    out = data.with_name(f"{kind}.pt")
-    for split, s in train(data, out, kind, epochs, batch, lr, dim).items():
+    """Train, then report scores on held-out battles (the newest day, or unseen players)."""
+    out = data.with_name(f"{kind}.pt" if by == "day" else f"{kind}-{by}.pt")
+    for split, s in train(data, out, kind, epochs, batch, lr, dim, by).items():
         typer.echo(
             f"{split}: log loss {s.log_loss:.4f} (coin flip 0.6931), accuracy {s.accuracy:.3f}, "
             f"AUC {s.auc:.4f}, calibration error {s.calibration:.4f}"

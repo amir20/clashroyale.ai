@@ -1,7 +1,10 @@
-"""Train a win-probability model on exported battles and score it on the newest day.
+"""Train a win-probability model on exported battles and score it on battles it never saw.
 
-The newest day is held out for testing and the day before for choosing when to stop, so the
-scores say how well the model predicts battles it never saw, as it will be used.
+- by day (default): the newest full day is the test, the day before chooses when to stop, so
+  the scores say how well the model predicts tomorrow, as it will be used.
+- by player: some players are held out entirely, and only battles between two of them are
+  tested. A model that scores well only by recognizing strong players (from their exact decks)
+  does worse here; one that learned how decks match up does about as well.
 """
 
 import json
@@ -46,15 +49,37 @@ def device() -> torch.device:
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
-def load(path: Path) -> tuple[dict[str, Split], int]:
-    df = pl.read_parquet(path)
-    vocab = json.loads(path.with_suffix(".vocab.json").read_text())
-    vocab_size = max(vocab.values()) + FORMS
+HELD_OUT = 0.15  # by player: share of players held out for the test, and again for validation
+
+
+def _by_day(df: pl.DataFrame) -> dict[str, pl.Expr]:
     per_day = df.group_by("day").len().sort("day")
     # A day still being crawled has a fraction of the battles: test on full days only.
     full = per_day.filter(pl.col("len") >= pl.col("len").max() / 4)["day"].to_list()
     test_day, val_day = full[-1], full[-2]
-    df = df.filter(pl.col("day") <= test_day)
+    day = pl.col("day")
+    return {"train": day < val_day, "val": day == val_day, "test": day == test_day}
+
+
+def _by_player(df: pl.DataFrame) -> dict[str, pl.Expr]:
+    def group(tag: str) -> pl.Expr:  # 0 = train, 1 = validation, 2 = test; stable per player
+        h = pl.col(tag).hash(seed=7) % 1000 / 1000
+        return pl.when(h < HELD_OUT).then(2).when(h < 2 * HELD_OUT).then(1).otherwise(0)
+
+    ga, gb = group("pa"), group("pb")
+    # A battle trains only if neither player is held out, and tests only if both are.
+    return {
+        "train": (ga == 0) & (gb == 0),
+        "val": (ga == 1) & (gb == 1),
+        "test": (ga == 2) & (gb == 2),
+    }
+
+
+def load(path: Path, by: str = "day") -> tuple[dict[str, Split], int]:
+    df = pl.read_parquet(path)
+    vocab = json.loads(path.with_suffix(".vocab.json").read_text())
+    vocab_size = max(vocab.values()) + FORMS
+    parts = {"day": _by_day, "player": _by_player}[by](df)
 
     def split(part: pl.DataFrame) -> Split:
         def side(col: str) -> Tensor:
@@ -68,11 +93,7 @@ def load(path: Path) -> tuple[dict[str, Split], int]:
             torch.from_numpy(part["y"].to_numpy().astype(np.float32)),
         )
 
-    splits = {
-        "train": split(df.filter(pl.col("day") < val_day)),
-        "val": split(df.filter(pl.col("day") == val_day)),
-        "test": split(df.filter(pl.col("day") == test_day)),
-    }
+    splits = {k: split(df.filter(f)) for k, f in parts.items()}
     log.info("battles: %s", {k: len(v) for k, v in splits.items()})
     return splits, vocab_size
 
@@ -120,9 +141,10 @@ def train(
     batch: int = 4096,
     lr: float = 2e-3,
     dim: int = 64,
+    by: str = "day",
 ) -> dict[str, Scores]:
     dev = device()
-    splits, vocab_size = load(data)
+    splits, vocab_size = load(data, by)
     model: nn.Module = {
         "decknet": lambda: DeckNet(vocab_size, dim=dim),
         "baseline": lambda: Baseline(vocab_size),

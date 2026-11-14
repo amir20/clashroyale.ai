@@ -66,9 +66,9 @@ def strength() -> list[pl.Expr]:
 def export(db_path: Path, out: Path, days: int = 8) -> int:
     """Write battles from the last `days` days to `out` (Parquet) and the vocabulary next to it.
 
-    Columns: day, ctx (mode + trophy bucket of side A), a and b (8 tokens each), la and lb
-    (average card level), ta and tb (trophies), y (1.0 if A won, 0.0 if B won; draws are
-    dropped). Returns the number of battles written.
+    Columns: day, ctx (mode + trophy bucket of side A), pa and pb (player tags), a and b (8 tokens
+    each), la and lb (average card level), ta and tb (trophies), y (1.0 if A won, 0.0 if B won;
+    draws are dropped). Returns the number of battles written.
     """
     vocab = vocabulary(db_path)
 
@@ -78,6 +78,7 @@ def export(db_path: Path, out: Path, days: int = 8) -> int:
             pl.col("deck_selection").cast(pl.String).fill_null("collection") == "collection",
         ).select(
             "battle_id",
+            pl.col("player_tag").cast(pl.String),
             "side",
             "score",
             pl.col("battle_time").str.slice(0, 10).alias("day"),
@@ -91,6 +92,7 @@ def export(db_path: Path, out: Path, days: int = 8) -> int:
     a = decks.filter(pl.col("side") == 0)
     b = decks.filter(pl.col("side") == 1).select(
         "battle_id",
+        pl.col("player_tag").alias("pb"),
         pl.col("t").alias("b"),
         pl.col("level").alias("lb"),
         pl.col("starting_trophies").alias("tb"),
@@ -101,6 +103,8 @@ def export(db_path: Path, out: Path, days: int = 8) -> int:
         .select(
             "day",
             "ctx",
+            pl.col("player_tag").alias("pa"),
+            "pb",
             pl.col("t").alias("a"),
             "b",
             pl.col("level").alias("la"),
