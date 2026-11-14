@@ -77,7 +77,7 @@ export type Report = {
   };
   intro: string;
   battles: Battle[];
-  similar: { battles: number; players: number; days: number; enough: boolean; near: boolean } | null;
+  similar: { battles: number; players: number; days: number; enough: boolean; near: boolean; ranked?: boolean } | null;
   patterns: {
     close_games: { games: number; wins: number; losses: number };
     three_crown_wins: number;

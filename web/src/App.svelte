@@ -162,7 +162,11 @@
             <div class="grid grid-cols-3 gap-2 mt-3 text-center">
               {#if who.mode === "pathOfLegend"}
                 <div><div class="stat-num text-lg text-primary">{who.league ? LEAGUES[who.league - 1] ?? `League ${who.league}` : "Ranked"}</div><div class="text-[11px] text-base-content/60">Ranked league</div></div>
-                <div><div class="stat-num text-lg">{who.rank ? `#${who.rank.toLocaleString()}` : who.rating ? who.rating.toLocaleString() : "—"}</div><div class="text-[11px] text-base-content/60">{who.rank ? "Rank" : "Rating"}</div></div>
+                {#if who.rank || who.rating}
+                  <div><div class="stat-num text-lg">{who.rank ? `#${who.rank.toLocaleString()}` : who.rating?.toLocaleString()}</div><div class="text-[11px] text-base-content/60">{who.rank ? "Rank" : "Rating"}</div></div>
+                {:else}
+                  <div><div class="stat-num text-lg">{who.trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Trophy Road</div></div>
+                {/if}
               {:else}
                 <div><div class="stat-num text-lg text-primary">{who.trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Trophies</div></div>
                 <div><div class="stat-num text-lg">{who.best_trophies?.toLocaleString() ?? "—"}</div><div class="text-[11px] text-base-content/60">Best</div></div>

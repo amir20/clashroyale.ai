@@ -299,7 +299,7 @@ def test_chat_history_reaches_the_model(db_path: Path) -> None:
 def test_overview_shows_similar_battles_and_card_status(db_path: Path) -> None:
     with client(db_path) as c:
         report = events(c.get(f"/api/players/{ME[1:]}/load").text)[-1]["report"]
-    assert set(report["similar"]) == {"battles", "players", "days", "enough", "near"}
+    assert set(report["similar"]) == {"battles", "players", "days", "enough", "near", "ranked"}
     assert all("status" in card for card in report["overview"]["deck"])
     assert set(report["story"]) == {
         "surprises",

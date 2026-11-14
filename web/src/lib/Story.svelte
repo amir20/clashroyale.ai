@@ -197,7 +197,7 @@
               <p class="text-sm text-center text-base-content/70" data-testid="thin">{them ? `Only ${o.record.games} ${o.record.games === 1 ? "game" : "games"} to go on, so there's not much to show yet.` : o.record.games ? `I've only got ${o.record.games} ${o.record.games === 1 ? "game" : "games"} to go on, so some cards stay hidden until you play more.` : "Play a few games and come back. I'll have plenty to say."}</p>
             {/if}
             {#if report.similar?.enough}
-              <p class="text-xs text-center text-base-content/60" data-testid="similar">Compared with {report.similar.battles.toLocaleString()} similar battles from {report.similar.players.toLocaleString()} players{report.similar.near ? ` near ${your} trophies` : ""}, last {report.similar.days} days.</p>
+              <p class="text-xs text-center text-base-content/60" data-testid="similar">Compared with {report.similar.battles.toLocaleString()} similar battles from {report.similar.players.toLocaleString()} players{report.similar.near ? (report.similar.ranked ? " in ranked" : ` near ${your} trophies`) : ""}, last {report.similar.days} days.</p>
             {/if}
           {:else if id === "wow"}
             <h2 class="text-2xl lg:text-3xl flex items-center gap-2"><Icon name="sparkle" class="w-6 h-6 text-primary" />Things you didn't know</h2>
@@ -313,7 +313,7 @@
                       {#if r.kind === "synergy"}
                         {r.how === "gained" ? "New combo" : "Loses a combo"}: {r.cards.map(named).join(" + ")} ({per100(r.effect)})
                       {:else}
-                        {r.effect > 0 ? "Better" : "Worse"} against {named(r.card)}, which {Math.round(r.share * 100)}% of decks at {your} trophies run ({per100(r.effect)})
+                        {r.effect > 0 ? "Better" : "Worse"} against {named(r.card)}, which {Math.round(r.share * 100)}% of decks {report.model?.field.where === "in ranked" ? "in ranked" : `at ${your} trophies`} run ({per100(r.effect)})
                       {/if}
                     </li>
                   {/each}

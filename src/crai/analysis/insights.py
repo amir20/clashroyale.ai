@@ -1104,6 +1104,7 @@ def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         "days": DEFAULT_SINCE_DAYS,
         "enough": fam.height >= MIN_FAMILY_DECKS,
         "near": family.near,
+        "ranked": bool(items) and items[0]["battle_type"] == "pathOfLegend",
     }
 
 
