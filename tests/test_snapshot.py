@@ -214,3 +214,15 @@ def test_a_refresh_that_wont_wait_skips_a_busy_snapshot(db_path: Path) -> None:
             snapshot.sync(db_path, wait=False)
     assert server.refresh(wait=False)
     assert server.decks().height == 406
+
+
+def test_an_outdated_snapshot_is_read_then_rebuilt(db_path: Path) -> None:
+    snapshot.sync(db_path)
+    d = snapshot.snapshot_dir(db_path)
+    for p in d.glob("*.parquet"):  # as written before `specials` existed
+        pl.read_parquet(p).drop("specials").write_parquet(p)
+    (d / ".format").unlink()
+    _, old = snapshot.read(db_path, sync=False)
+    assert old.height == 400 and old["specials"].null_count() == 400
+    assert snapshot.sync(db_path) == 400  # rebuilt with the new columns
+    assert (d / ".format").read_text() == str(snapshot.FORMAT)

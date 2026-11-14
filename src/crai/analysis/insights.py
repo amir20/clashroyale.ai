@@ -20,6 +20,8 @@ from crai.analysis.analytics import (
     Filters,
     _margin,
     shared_cards,
+    special_count,
+    specials,
 )
 from crai.collect.client import normalize_tag
 
@@ -83,6 +85,54 @@ def _played_as(card: dict[str, Any], evolution_level: int | None) -> dict[str, A
 
 def _ids(key: str | None) -> list[int]:
     return [int(x) for x in key.split("-")] if key else []
+
+
+def slots(a: Analyzer, tag: str, items: list[Game]) -> dict[int, int]:
+    """How each card of their current deck was played in their newest game: card -> status
+    (0 plain, 1 Evolution, 2 Hero, 3 both). A swap has to fit the slot the card leaves."""
+    if not items:
+        return {}
+    rows = a.query(
+        """SELECT card_id, coalesce(evolution_level, 0) AS status FROM participant_cards
+           WHERE battle_id = ? AND player_tag = ? AND kind = 'deck'""",
+        (items[0]["battle_id"], normalize_tag(tag)),
+    )
+    return {r["card_id"]: r["status"] for r in rows.to_dicts()}
+
+
+def unlocked(a: Analyzer, tag: str) -> dict[int, int] | None:
+    """The Evolution/Hero modes the player has unlocked per card (same bits as `slots`), or None
+    when their collection hasn't been fetched."""
+    rows = a.query(
+        "SELECT card_id, coalesce(evolution_level, 0) AS status FROM player_cards WHERE tag = ?",
+        (normalize_tag(tag),),
+    )
+    return {r["card_id"]: r["status"] for r in rows.to_dicts()} or None
+
+
+def can_play(card: dict[str, Any], status: int) -> bool:
+    """Whether the card has the Evolution/Hero form a slot needs."""
+    return (not status & 1 or bool(card["evo_icon"])) and (
+        not status & 2 or bool(card["hero_icon"])
+    )
+
+
+def _variants(decks: pl.DataFrame) -> pl.DataFrame:
+    """One row per card per deck, with how it was played (`status`, 0 = plain)."""
+    d = decks.select("player_tag", "score", "cards", sp=specials()).with_row_index("deck")
+    special = (
+        d.select("deck", v=pl.col("sp"))
+        .explode("v")
+        .drop_nulls("v")
+        .select("deck", card_id=pl.col("v") // 10, status=pl.col("v") % 10)
+    )
+    return (
+        d.drop("sp")
+        .explode("cards")
+        .rename({"cards": "card_id"})
+        .join(special, on=["deck", "card_id"], how="left")
+        .with_columns(pl.col("status").fill_null(0))
+    )
 
 
 def games(a: Analyzer, tag: str) -> list[Game]:
@@ -484,14 +534,19 @@ class Family:
     min_shared: int  # every deck shares at least this many cards
 
 
-def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game]) -> Family:
-    """Comparable decks: near the player's trophies and sharing 5+ cards, when there are enough."""
+def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game], n_special: int) -> Family:
+    """Comparable decks: near the player's trophies and sharing 5+ cards, when there are enough.
+
+    Every deck fills as many Evolution/Hero slots as theirs: an extra Evolution wins more games
+    on its own, and would credit whichever cards happen to come with it.
+    """
 
     def alike(decks: pl.DataFrame) -> pl.DataFrame:
         return (
             decks.filter(pl.col("player_tag") != tag)
             .with_columns(shared=shared_cards(mine))
             .filter(pl.col("shared").is_between(4, 7))
+            .filter(special_count() == n_special)
         )
 
     def pick() -> Family:
@@ -505,12 +560,15 @@ def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game]) -> Family
             return Family(closer, is_near, CLOSE_SHARED_CARDS)
         return Family(pool, is_near, 4)
 
-    return _near_stat(a, ("family", tag, tuple(sorted(mine))), items, pick)
+    return _near_stat(a, ("family", tag, tuple(sorted(mine)), n_special), items, pick)
 
 
 def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
     """How much comparable evidence there is for this player's current deck."""
-    family = _family(a, normalize_tag(tag), _ids(current_deck_key(items)), items)
+    tag = normalize_tag(tag)
+    played = slots(a, tag, items)
+    n_special = sum(1 for s in played.values() if s)
+    family = _family(a, tag, _ids(current_deck_key(items)), items, n_special)
     fam = family.decks
     return {
         "battles": fam.height,
@@ -522,36 +580,46 @@ def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
 
 
 def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
-    """Compare each card, with vs without, across other players' similar decks (last 7 days)."""
+    """Compare each card, with vs without, across other players' similar decks (last 7 days).
+
+    Cards are judged as they're played: a Hero Giant and a plain Giant are different cards. A
+    replacement has to fit the slot it takes: plain for a plain card, and for an Evolution or Hero
+    slot, a card with that form the player has unlocked.
+    """
     tag = normalize_tag(tag)
     key = current_deck_key(items)
     if key is None:
         return {"enough": False, "family_decks": 0, "no_games": True}
     mine = _ids(key)
-    family = _family(a, tag, mine, items)
+    played = slots(a, tag, items)
+    family = _family(a, tag, mine, items, sum(1 for s in played.values() if s))
     fam = family.decks
     n, wins = fam.height, float(fam["score"].sum() or 0)
     if n < MIN_FAMILY_DECKS:
         return {"enough": False, "family_decks": n}
     cards = _cards(a)
+    v = _variants(fam)
+    per_card = v.group_by("card_id").agg(card_games=pl.len(), card_wins=pl.col("score").sum())
+    # A variant against decks without the card at all, so another form of it doesn't muddy both.
     per = (
-        fam.explode("cards")
-        .group_by(pl.col("cards").alias("card_id"))
+        v.group_by("card_id", "status")
         .agg(
             games=pl.len(),
             players=pl.col("player_tag").n_unique(),
             wins=pl.col("score").sum(),
         )
-        .filter(pl.col("games") < n)
+        .join(per_card, on="card_id")
+        .filter(pl.col("card_games") < n)
         .with_columns(
-            gain=pl.col("wins") / pl.col("games") - (wins - pl.col("wins")) / (n - pl.col("games")),
-            margin=1.96 * (0.25 / pl.col("games") + 0.25 / (n - pl.col("games"))).sqrt(),
+            gain=pl.col("wins") / pl.col("games")
+            - (wins - pl.col("card_wins")) / (n - pl.col("card_games")),
+            margin=1.96 * (0.25 / pl.col("games") + 0.25 / (n - pl.col("card_games"))).sqrt(),
         )
         .to_dicts()
     )
 
     def row(r: dict[str, Any]) -> dict[str, Any]:
-        return cards[r["card_id"]] | {
+        return _played_as(cards[r["card_id"]], r["status"]) | {
             "games": r["games"],
             "players": r["players"],
             "gain": round(r["gain"], 3),
@@ -560,15 +628,30 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         }
 
     yours = sorted(
-        (row(r) for r in per if r["card_id"] in mine and r["card_id"] in cards),
+        (
+            row(r)
+            for r in per
+            if r["card_id"] in cards
+            and r["card_id"] in mine
+            and r["status"] == played.get(r["card_id"], 0)
+        ),
         key=lambda r: r["gain"],
     )
+    weakest = yours[0] if yours else None
+    slot = played.get(weakest["id"], 0) if weakest else 0
+    owned = unlocked(a, tag) if slot else None
+
+    def fits(cid: int) -> bool:
+        return can_play(cards[cid], slot) and (owned is None or owned.get(cid, 0) & slot == slot)
+
     candidates = sorted(
         (
             row(r)
             for r in per
             if r["card_id"] not in mine
             and r["card_id"] in cards
+            and r["status"] == slot
+            and fits(r["card_id"])
             and r["games"] >= 100
             and r["players"] >= MIN_CANDIDATE_PLAYERS
             and r["gain"] > max(r["margin"], MEANINGFUL_GAIN)
@@ -584,8 +667,9 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         "family_players": fam["player_tag"].n_unique(),
         "yours": yours,
         "candidates": candidates[:4],
-        "tested": sum(1 for r in per if r["card_id"] not in mine),
-        "weakest": yours[0] if yours else None,
+        "tested": len({r["card_id"] for r in per if r["card_id"] not in mine}),
+        "weakest": weakest,
+        "slot": STATUS.get(slot),  # the weakest card's slot, which every candidate fits
     }
 
 

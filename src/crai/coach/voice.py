@@ -69,6 +69,15 @@ def wins_and_losses(w: dict[str, Any]) -> str:
     return f"{crowns} {clutch}{ouch}".strip()
 
 
+FORM = {"evolution": "Evo", "hero": "Hero", "both": "Evo + Hero"}
+
+
+def _as_played(card: dict[str, Any]) -> str:
+    """'Hero Giant' for a card in a Hero slot, plain 'Giant' otherwise."""
+    form = FORM.get(card.get("status") or "")
+    return f"{form} {card['name']}" if form else card["name"]
+
+
 def _per_100(gain: float) -> str:
     return f"{abs(gain) * 100:.1f} {'more' if gain > 0 else 'fewer'} games per 100"
 
@@ -86,17 +95,17 @@ def replace_card(r: dict[str, Any]) -> str:
         return "I couldn't rate your cards this time. Try again after a few more games."
     stats = f"decks with it win {_per_100(weak['gain'])} than decks without it"
     if weak["real"]:
-        msg = f"{weak['name']} is costing you: {stats}, across {n} decks like yours."
+        msg = f"{_as_played(weak)} is costing you: {stats}, across {n} decks like yours."
     else:
         msg = (
             f"I checked {n} decks like yours and no card in yours is actually hurting you. "
-            f"{weak['name']} is your lowest: {stats}, and that gap's too small to matter. "
+            f"{_as_played(weak)} is your lowest: {stats}, and that gap's too small to matter. "
             "Your losses are coming from somewhere else, so ask me why you keep losing."
         )
     if r["candidates"]:
         c = r["candidates"][0]
         msg += (
-            f" If you're itching to swap, test {c['name']}: decks with it win "
+            f" If you're itching to swap, test {_as_played(c)}: decks with it win "
             f"{_per_100(c['gain'])}, from {c['players']:,} different players. "
             "I checked a lot of cards, so it could still be a fluke."
         )
@@ -111,13 +120,12 @@ def try_line(r: dict[str, Any]) -> str:
     if r["candidates"]:
         c = r["candidates"][0]
         return (
-            f"Test {c['name']} for {weak['name']}. Decks like yours with it win "
+            f"Test {_as_played(c)} for {_as_played(weak)}. Decks like yours with it win "
             f"{_per_100(c['gain'])}. Could still be a fluke, so give it 20 games."
         )
     if weak["real"]:
-        return (
-            f"{weak['name']} is costing you: decks like yours win {_per_100(weak['gain'])} with it."
-        )
+        gain = _per_100(weak["gain"])
+        return f"{_as_played(weak)} is costing you: decks like yours win {gain} with it."
     return "None of your cards is hurting you. Your losses come from somewhere else."
 
 

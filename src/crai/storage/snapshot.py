@@ -39,10 +39,19 @@ MAX_PARTS = 16  # compact into one part beyond this
 CHUNK_BATTLES = 200_000  # battle ids read per part, so a full rebuild never holds every row
 _PART = re.compile(r"decks-(\d{9})-(\d{9})\.parquet")
 
-# One row per player per 1v1 battle with a full 8-card deck.
+# Bump when the columns change: parts in an older format are rebuilt on the next sync.
+FORMAT = 2
+_FORMAT_FILE = ".format"
+
+# One row per player per 1v1 battle with a full 8-card deck. `specials` lists the cards played as
+# an Evolution or Hero, each as card_id * 10 + evolution_level, sorted and joined by '-'.
 _QUERY = """
 SELECT bp.battle_id, bp.player_tag, bp.side, bp.result, bp.deck_key, bp.starting_trophies,
-       b.battle_type, b.deck_selection, b.battle_time
+       b.battle_type, b.deck_selection, b.battle_time,
+       (SELECT group_concat(v, '-') FROM (
+          SELECT pc.card_id * 10 + pc.evolution_level AS v FROM participant_cards pc
+          WHERE pc.battle_id = bp.battle_id AND pc.player_tag = bp.player_tag
+            AND pc.kind = 'deck' AND pc.evolution_level > 0 ORDER BY v)) AS specials
 FROM battles b JOIN battle_participants bp ON bp.battle_id = b.id
 WHERE b.rowid BETWEEN ? AND ? AND b.team_size = 1
   AND bp.deck_key IS NOT NULL AND bp.result IS NOT NULL
@@ -60,6 +69,7 @@ def _schema() -> dict[str, pl.DataType]:
         "battle_type": pl.String(),
         "deck_selection": pl.String(),
         "battle_time": pl.String(),
+        "specials": pl.String(),
     }
 
 
@@ -153,11 +163,13 @@ def _sync(db_path: Path) -> int:
             raise LegacySchemaError(db_path)
         latest: int = conn.execute("SELECT coalesce(max(rowid), 0) FROM battles").fetchone()[0]
         start = covered_rowid(db_path)
-        if latest < start:  # database was rebuilt or shrunk underneath us
-            log.warning("snapshot ahead of database; rebuilding")
+        stale = latest < start  # database was rebuilt or shrunk underneath us
+        if stale or (start and _format(d) != FORMAT):
+            log.warning("snapshot %s; rebuilding", "ahead of database" if stale else "outdated")
             for *_, part in _parts(d):
                 part.unlink()
             start = 0
+        _set_format(d)
         if latest == start:
             return 0
         # One part per chunk of battle ids. Memory stays flat however far behind the snapshot
@@ -177,6 +189,19 @@ def _sync(db_path: Path) -> int:
     if len(_parts(d)) > MAX_PARTS:
         _compact(d)
     return appended
+
+
+def _format(d: Path) -> int:
+    try:
+        return int((d / _FORMAT_FILE).read_text())
+    except OSError, ValueError:
+        return 1  # parts written before the format was recorded
+
+
+def _set_format(d: Path) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    if _format(d) != FORMAT:
+        (d / _FORMAT_FILE).write_text(str(FORMAT))
 
 
 def _compact(d: Path) -> None:
@@ -217,6 +242,8 @@ def read(
             ).lazy()
             return covered_rowid(db_path), (transform(scan) if transform else scan).collect()
         scan = pl.scan_parquet([p for *_, p in parts])
+        if _format(snapshot_dir(db_path)) < FORMAT:  # not rebuilt yet: nothing is known as special
+            scan = scan.with_columns(specials=pl.lit(None, pl.String()))
         if after:
             scan = scan.filter(pl.col("battle_id") > after)
         if days:  # keep long-running servers from loading every battle ever crawled

@@ -16,15 +16,20 @@ from crai.analysis.analytics import (
     CardRef,
     DeckResult,
     Filters,
+    plays,
     shared_cards,
+    special_count,
 )
 from crai.analysis.insights import (
     CLOSE_SHARED_CARDS,
     MEANINGFUL_GAIN,
+    STATUS,
     Game,
     _cards,
     _ids,
+    _played_as,
     _record,
+    can_play,
     compared,
     current_deck_key,
     elixir_standing,
@@ -32,6 +37,7 @@ from crai.analysis.insights import (
     near_player,
     nemesis,
     record_against,
+    slots,
     trend,
     trophy_scope,
     wins_and_losses,
@@ -62,14 +68,23 @@ def _where(items: list[Game] | None) -> tuple[Filters, str]:
 
 
 def _swap_pools(
-    a: Analyzer, tag: str, items: list[Game], others: list[int], first: int, second: int
+    a: Analyzer,
+    tag: str,
+    items: list[Game],
+    others: list[int],
+    first: int,
+    second: int,
+    n_special: int,
 ) -> Iterator[tuple[pl.DataFrame, bool, int]]:
-    """Comparable decks running exactly one of the two cards, strictest selection first."""
+    """Comparable decks running exactly one of the two cards, strictest selection first.
+
+    They fill as many Evolution/Hero slots as the player's deck does."""
     has_first, has_second = (pl.col("cards").list.contains(c) for c in (first, second))
     rest = (
         a.decks()
         .filter(pl.col("player_tag") != tag, has_first != has_second)
         .with_columns(shared=shared_cards(others))
+        .filter(pl.col("shared") >= 4, special_count() == n_special)
     )
     near = near_player(rest, items)
     for pool, is_near in [*([(near, True)] if near is not None else []), (rest, False)]:
@@ -93,12 +108,21 @@ def swap_view(
     if out_id not in mine and in_id in mine:  # the card they already run goes on the left
         out_id, in_id = in_id, out_id
     others = [c for c in mine if c not in (out_id, in_id)]
+    played = slots(a, tag, items)
+    # The card coming in takes the leaving card's slot, so both are judged in that form.
+    slot = played.get(out_id, 0)
+    if not can_play(cards[in_id], slot):
+        form = STATUS[slot]
+        return {
+            "error": f"{cards[in_id]['name']} has no {form} form, so it can't take "
+            f"{cards[out_id]['name']}'s {form} slot. Compare it with one of their plain cards."
+        }
 
     def side(pool: pl.DataFrame, cid: int) -> dict[str, Any]:
-        running = pool.filter(pl.col("cards").list.contains(cid))
+        running = pool.filter(plays(cid, slot))
         rate = running["score"].mean() if running.height else None
         played = [g for g in items if cid in _ids(g["deck_key"])]
-        return cards[cid] | {
+        return _played_as(cards[cid], slot) | {
             "games": running.height,
             "players": running["player_tag"].n_unique() if running.height else 0,
             "rate": rate,
@@ -106,10 +130,11 @@ def swap_view(
         }
 
     def enough(pool: pl.DataFrame) -> bool:
-        running = [pool.filter(pl.col("cards").list.contains(c)).height for c in (out_id, in_id)]
+        running = [pool.filter(plays(c, slot)).height for c in (out_id, in_id)]
         return min(running) >= MIN_VISUAL_GAMES
 
-    pools = list(_swap_pools(a, normalize_tag(tag), items, others, out_id, in_id))
+    n_special = sum(1 for s in played.values() if s)
+    pools = list(_swap_pools(a, normalize_tag(tag), items, others, out_id, in_id, n_special))
     pool, near, needed = next((p for p in pools if enough(p[0])), pools[-1])
     out_side, in_side = side(pool, out_id), side(pool, in_id)
     verdict, gap = "unknown", None
@@ -121,6 +146,7 @@ def swap_view(
         verdict = "even"
         if abs(diff) > max(margin, MEANINGFUL_GAIN):
             verdict = "better" if diff > 0 else "worse"
+    slot_note = f", each card played as {STATUS[slot]}" if slot else ", both cards played plain"
     range_note = "within the player's trophy range" if near else "at all trophy levels"
     return {
         "type": "swap",
@@ -132,7 +158,8 @@ def swap_view(
         "near": near,
         "min_shared_cards": needed,
         "scope": (
-            f"Other players' decks sharing at least {needed} of this player's other cards, "
+            f"Other players' decks sharing at least {needed} of this player's other cards "
+            f"and as many Evolution/Hero slots{slot_note}, "
             f"{range_note}. Say 'decks like yours' and quote only `gap`, as wins per 100 games. "
             "The verdict is the conclusion: agree with it."
         ),

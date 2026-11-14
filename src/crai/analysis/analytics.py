@@ -238,6 +238,30 @@ def shared_cards(ids: Sequence[int]) -> pl.Expr:
     return pl.col("cards").list.eval(pl.element().is_in(list(ids))).list.sum()
 
 
+def specials() -> pl.Expr:
+    """The deck's Evolution/Hero cards, each as card_id * 10 + evolution_level ([] if none)."""
+    return (
+        pl.col("specials")
+        .cast(pl.String())
+        .str.split("-")
+        .cast(pl.List(pl.Int64()))
+        .fill_null(pl.lit([], dtype=pl.List(pl.Int64())))
+    )
+
+
+def special_count() -> pl.Expr:
+    """How many of the deck's slots hold an Evolution or Hero."""
+    return specials().list.len()
+
+
+def plays(card_id: int, status: int) -> pl.Expr:
+    """Whether the deck runs `card_id` as `status` (0 plain, 1 Evolution, 2 Hero, 3 both)."""
+    if status:
+        return specials().list.contains(card_id * 10 + status)
+    special = specials().list.eval(pl.element() // 10 == card_id).list.any()
+    return pl.col("cards").list.contains(card_id) & ~special
+
+
 class Analyzer:
     def __init__(
         self,
@@ -319,7 +343,7 @@ class Analyzer:
 
         def shape(scan: pl.LazyFrame) -> pl.LazyFrame:
             return scan.with_columns(
-                pl.col("player_tag", "deck_key", "battle_type", "deck_selection").cast(
+                pl.col("player_tag", "deck_key", "battle_type", "deck_selection", "specials").cast(
                     pl.Categorical()
                 ),
                 is_top=pl.col("player_tag").is_in(list(seeds)).cast(pl.Int8()),
