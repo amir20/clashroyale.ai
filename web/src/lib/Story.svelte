@@ -285,6 +285,9 @@
                   <Icon name="swap" class="w-6 h-6 text-primary" />
                   <div class="w-20 mx-auto">{@render tile(swap, swap.name)}</div>
                   <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks like yours</span></div>
+                  <div class="col-span-3 text-center text-xs text-base-content/60">{swap.match?.exact ? "Players running your exact deck with only this swap" : `Decks sharing ${swap.match?.shared ?? 5}+ of your other cards`}</div>
+                  {#if swap.match?.also}<div class="col-span-3 text-center text-xs">{Math.round(swap.match.also.share * 100)}% also swapped {swap.match.also.dropped.map((c: any) => c.name).join(" + ")} for {swap.match.also.added.map((c: any) => c.name).join(" + ")}</div>{/if}
+                  {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
                 {/if}
               </div>
             {/if}

@@ -82,6 +82,31 @@ def _per_100(gain: float) -> str:
     return f"{abs(gain) * 100:.1f} {'more' if gain > 0 else 'fewer'} games per 100"
 
 
+def _names(cards: list[dict[str, Any]]) -> str:
+    names = [c["name"] for c in cards]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def swap_caveats(c: dict[str, Any]) -> str:
+    """How literal the swap is, and where it loses: the swap may not work on its own."""
+    out = []
+    m = c.get("match") or {}
+    if m.get("exact"):
+        out.append("That's players running your exact deck with just that one change.")
+    elif m.get("also"):
+        also = m["also"]
+        out.append(
+            f"Heads up: {round(also['share'] * 100)}% of those decks also swapped "
+            f"{_names(also['dropped'])} for {_names(also['added'])}, so you may need both."
+        )
+    if watch := c.get("watch_out"):
+        worst = watch[0]
+        out.append(
+            f"It's weaker against {_names(watch)}: {_per_100(worst['gap'])} vs {worst['name']}."
+        )
+    return " ".join(out)
+
+
 def replace_card(r: dict[str, Any]) -> str:
     if r.get("no_games"):
         return "No recent games, so no deck to judge. Go play a few and I'll tear it apart."
@@ -106,9 +131,10 @@ def replace_card(r: dict[str, Any]) -> str:
         c = r["candidates"][0]
         msg += (
             f" If you're itching to swap, test {_as_played(c)}: decks with it win "
-            f"{_per_100(c['gain'])}, from {c['players']:,} different players. "
+            f"{_per_100(c['gain'])} than decks keeping {_as_played(weak)}, from "
+            f"{c['players']:,} different players. {swap_caveats(c)} "
             "I checked a lot of cards, so it could still be a fluke."
-        )
+        ).replace("  ", " ")
     return msg
 
 
@@ -121,8 +147,8 @@ def try_line(r: dict[str, Any]) -> str:
         c = r["candidates"][0]
         return (
             f"Test {_as_played(c)} for {_as_played(weak)}. Decks like yours with it win "
-            f"{_per_100(c['gain'])}. Could still be a fluke, so give it 20 games."
-        )
+            f"{_per_100(c['gain'])}. {swap_caveats(c)} Could still be a fluke, so give it 20 games."
+        ).replace("  ", " ")
     if weak["real"]:
         gain = _per_100(weak["gain"])
         return f"{_as_played(weak)} is costing you: decks like yours win {gain} with it."

@@ -64,7 +64,13 @@
     {#if v.gap != null}
       <p class="text-center text-sm mt-1" data-testid="swap-gap">{v.in.name} decks win about <span class="stat-num">{Math.abs(v.gap * 100).toFixed(1)} {v.gap >= 0 ? "more" : "fewer"}</span> games per 100</p>
     {/if}
-    <p class="text-center text-xs text-base-content/60 mt-0.5">Decks sharing at least {v.min_shared_cards} of your other cards{v.near ? ", near your trophies" : ""}</p>
+    <p class="text-center text-xs text-base-content/60 mt-0.5" data-testid="swap-match">{v.match?.exact ? `${Your} exact deck with only this card changed` : `Decks sharing at least ${v.min_shared_cards} of ${your} other cards`}{v.near ? ", near " + your + " trophies" : ""}</p>
+    {#if v.match?.also}
+      <p class="text-center text-xs mt-2" data-testid="swap-also">{Math.round(v.match.also.share * 100)}% of these decks also swapped {v.match.also.dropped.map((c: any) => c.name).join(" + ")} for {v.match.also.added.map((c: any) => c.name).join(" + ")}</p>
+    {/if}
+    {#if v.watch_out?.length}
+      <p class="text-center text-xs mt-1 text-warning" data-testid="swap-watch">Weaker against {v.watch_out.map((c: any) => `${c.name} (${(c.gap * 100).toFixed(0)} per 100)`).join(", ")}</p>
+    {/if}
   {:else if v.type === "matchup"}
     <div class="flex items-center gap-4">
       <div class="w-16 shrink-0">{@render tile(v.card)}</div>

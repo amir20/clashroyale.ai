@@ -29,12 +29,14 @@ from crai.analysis.insights import (
     compared,
     current_deck_key,
     elixir_standing,
+    match,
     near_filters,
     nemesis,
     record_against,
     slots,
     trend,
     trophy_scope,
+    weak_spots,
     wins_and_losses,
 )
 
@@ -104,6 +106,16 @@ def swap_view(
     verdict, gap, near, needed = h2h.verdict, h2h.gap, h2h.near, h2h.needed
     slot_note = f", each card played as {STATUS[slot]}" if slot else ", both cards played plain"
     range_note = "within the player's trophy range" if near else "at all trophy levels"
+    how = match(h2h, cards)
+    if h2h.exact:
+        decks_note = "Other players running this player's exact deck with only this card changed"
+    else:
+        decks_note = (
+            f"Other players' decks sharing at least {needed} of this player's "
+            f"{len(others)} other cards (so up to {len(others) - needed} more changed: "
+            "`match.also` is the most common other change; mention it, the swap may need it)"
+        )
+    watch = weak_spots(a, h2h)
     return {
         "type": "swap",
         "out": out_side,
@@ -113,11 +125,13 @@ def swap_view(
         "family_decks": h2h.decks,
         "near": near,
         "min_shared_cards": needed,
+        "match": how,
+        "watch_out": watch,
         "scope": (
-            f"Other players' decks sharing at least {needed} of this player's other cards "
-            f"and as many Evolution/Hero slots{slot_note}, "
-            f"{range_note}. Say 'decks like yours' and quote only `gap`, as wins per 100 games. "
-            "The verdict is the conclusion: agree with it."
+            f"{decks_note}, with as many Evolution/Hero slots{slot_note}, {range_note}. "
+            "Say 'decks like yours' and quote only `gap`, as wins per 100 games. "
+            "The verdict is the conclusion: agree with it. `watch_out` lists opponent cards "
+            "the new card's decks do clearly worse against (gap per 100): warn about them."
         ),
     }
 

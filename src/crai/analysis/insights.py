@@ -6,7 +6,7 @@ answers need no AI call and can't be hallucinated. `coach.py` turns these result
 
 from collections import Counter, defaultdict
 from collections.abc import Callable, Hashable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import ceil
 from statistics import median
 from typing import Any
@@ -566,6 +566,8 @@ def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game], n_special
 
 MIN_SWAP_GAMES = 100  # decks running each card, before a head-to-head says anything
 SHORTLIST = 8  # candidates checked head-to-head
+MIN_COMPANION_SHARE = 0.25  # "most of these decks also changed X" needs this share of them
+MIN_WEAK_SPOT_GAMES = 30  # games against an opponent card, per side, to call out a weak spot
 
 
 @dataclass(frozen=True)
@@ -583,7 +585,11 @@ class HeadToHead:
     verdict: str  # better / worse / even / unknown
     decks: int
     near: bool
-    needed: int  # shared cards every deck has
+    needed: int  # of the player's other cards, every deck has at least this many
+    exact: bool  # every deck is the player's deck with only this card changed
+    # When decks changed more than this card: the most common other change (ids), and its share.
+    also: tuple[tuple[int, ...], tuple[int, ...], float] | None
+    sides: tuple[pl.DataFrame, pl.DataFrame] = field(repr=False, compare=False)
 
 
 class SwapField:
@@ -617,15 +623,22 @@ class SwapField:
         yield self._all, False
 
     def compare(self, out_id: int, in_id: int, slot: int) -> HeadToHead:
-        """Both cards judged in the slot the leaving card fills."""
+        """Both cards judged in the slot the leaving card fills.
+
+        Decks as close to theirs as the games allow: their exact deck with only this card
+        changed, then one more card changed, and so on. A deck that drops a card usually has to
+        cover for it (losing Musketeer means losing air defense), so the closer the decks, the
+        more the gap is about this swap alone.
+        """
         has_out, has_in = (pl.col("cards").list.contains(c) for c in (out_id, in_id))
+        top = len(self._others)
         chosen = None
-        for pool, near in self.pools():
-            one = pool.filter(has_out != has_in)
-            for needed in (CLOSE_SHARED_CARDS, 4):
-                p = one.filter(pl.col("shared") >= needed)
-                sides = [p.filter(plays(c, slot)) for c in (out_id, in_id)]
-                chosen = (p, sides, near, needed)
+        for needed in range(top, 3, -1):
+            for pool, near in self.pools():
+                p = pool.filter(has_out != has_in, pl.col("shared") >= needed)
+                sides = (p.filter(plays(out_id, slot)), p.filter(plays(in_id, slot)))
+                if chosen is None or min(s.height for s in sides) >= MIN_SWAP_GAMES:
+                    chosen = (p, sides, near, needed)
                 if min(s.height for s in sides) >= MIN_SWAP_GAMES:
                     break
             else:
@@ -656,7 +669,95 @@ class SwapField:
             decks=p.height,
             near=near,
             needed=needed,
+            exact=needed == top,
+            also=self._also(i, in_id) if needed < top else None,
+            sides=(o, i),
         )
+
+    def _also(
+        self, decks: pl.DataFrame, in_id: int
+    ) -> tuple[tuple[int, ...], tuple[int, ...], float] | None:
+        """What else the decks with the new card changed, if most of them changed the same."""
+        if not decks.height:
+            return None
+        others = self._others
+        changes = (
+            decks.select(
+                dropped=pl.lit(others).list.set_difference(pl.col("cards")).list.sort(),
+                added=pl.col("cards").list.set_difference(pl.lit([*others, in_id])).list.sort(),
+            )
+            .group_by("dropped", "added")
+            .len()
+            .sort("len", descending=True)
+        )
+        top = changes.row(0, named=True)
+        share = top["len"] / decks.height
+        if not top["dropped"] or share < MIN_COMPANION_SHARE:
+            return None
+        return (tuple(top["dropped"]), tuple(top["added"]), round(share, 2))
+
+
+def weak_spots(a: Analyzer, h2h: HeadToHead, limit: int = 3) -> list[dict[str, Any]]:
+    """Opponent cards the swap does clearly worse against: what the leaving card was covering
+    (Musketeer out, and air decks start winning)."""
+    o, i = h2h.sides
+    if min(o.height, i.height) < MIN_SWAP_GAMES:
+        return []
+    ids = pl.concat([o["battle_id"], i["battle_id"]]).unique()
+    opp = (
+        a.decks()
+        .filter(pl.col("battle_id").is_in(ids.implode()))
+        .select("battle_id", pl.col("side").alias("opp_side"), pl.col("cards").alias("opp"))
+    )
+
+    def against(d: pl.DataFrame) -> pl.DataFrame:
+        return (
+            d.select("battle_id", "side", "score")
+            .join(opp, on="battle_id")
+            .filter(pl.col("side") != pl.col("opp_side"))
+            .explode("opp")
+            .group_by("opp")
+            .agg(n=pl.len(), rate=pl.col("score").mean())
+        )
+
+    rows = (
+        against(o)
+        .join(against(i), on="opp", suffix="_in")
+        .filter(pl.col("n") >= MIN_WEAK_SPOT_GAMES, pl.col("n_in") >= MIN_WEAK_SPOT_GAMES)
+        .with_columns(
+            gap=pl.col("rate_in") - pl.col("rate"),
+            margin=1.96 * (0.25 / pl.col("n") + 0.25 / pl.col("n_in")).sqrt(),
+        )
+        .filter(pl.col("gap") < -pl.max_horizontal(pl.col("margin"), pl.lit(MEANINGFUL_GAIN)))
+        .sort("gap")
+        .head(limit)
+        .to_dicts()
+    )
+    cards = _cards(a)
+    return [
+        cards[r["opp"]]
+        | {
+            "gap": round(r["gap"], 3),
+            "margin": round(r["margin"], 3),
+            "games": r["n_in"],
+            "out_games": r["n"],
+        }
+        for r in rows
+        if r["opp"] in cards
+    ]
+
+
+def match(h2h: HeadToHead, cards: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """How closely the compared decks match the player's, for the UI and Rook's wording."""
+    also = None
+    if h2h.also:
+        dropped, added, share = h2h.also
+        also = {
+            "dropped": [cards[c] for c in dropped if c in cards],
+            "added": [cards[c] for c in added if c in cards],
+            "share": share,
+        }
+    return {"exact": h2h.exact, "shared": h2h.needed, "near": h2h.near, "also": also}
 
 
 def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
@@ -757,7 +858,7 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         key=lambda r: r["gain"] - r["margin"],
         reverse=True,
     )[:SHORTLIST]
-    candidates = []
+    checked: list[tuple[dict[str, Any], HeadToHead]] = []
     if weakest and shortlist:
         others = [c for c in mine if c != weakest["id"]]
         field = SwapField(a, tag, items, others, sum(1 for s in played.values() if s))
@@ -765,17 +866,19 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
             h2h = field.compare(weakest["id"], c["id"], slot)
             if h2h.verdict != "better" or h2h.gap is None or h2h.margin is None:
                 continue
-            candidates.append(
-                c
-                | {
-                    "gain": h2h.gap,  # the same number the swap chart shows
-                    "margin": h2h.margin,
-                    "games": h2h.in_games,
-                    "players": h2h.in_players,
-                    "real": True,
-                }
-            )
-        candidates.sort(key=lambda r: r["gain"] - r["margin"], reverse=True)
+            row_ = c | {
+                "gain": h2h.gap,  # the same number the swap chart shows
+                "margin": h2h.margin,
+                "games": h2h.in_games,
+                "players": h2h.in_players,
+                "real": True,
+                "match": match(h2h, cards),
+            }
+            checked.append((row_, h2h))
+        checked.sort(key=lambda x: x[0]["gain"] - x[0]["margin"], reverse=True)
+    candidates = [r for r, _ in checked]
+    if checked:  # where the best swap loses, for the one Rook suggests
+        candidates[0]["watch_out"] = weak_spots(a, checked[0][1])
     return {
         "enough": True,
         "family_decks": n,
