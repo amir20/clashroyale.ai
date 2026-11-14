@@ -292,9 +292,9 @@
             {@render says(report.story.lines.replace)}
             {#if swap}
               <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
-                <div class="flex justify-center gap-2">{#each swap.out as c (c.id)}<div class="w-16">{@render tile(c, c.name, c.status)}</div>{/each}</div>
+                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.out as c (c.id)}<div class={swap.out.length > 2 ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, swap.out.length > 2 ? undefined : c.name, c.status)}</div>{/each}</div>
                 <Icon name="swap" class="w-6 h-6 text-primary" />
-                <div class="flex justify-center gap-2">{#each swap.in as c (c.id)}<div class="w-16">{@render tile(c, c.name, c.status)}</div>{/each}</div>
+                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.in as c (c.id)}<div class={swap.in.length > 2 ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, swap.in.length > 2 ? undefined : c.name, c.status)}</div>{/each}</div>
                 <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks built on your core</span></div>
                 {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
               </div>
@@ -304,7 +304,7 @@
                 <div class="rounded-xl border border-base-content/10 p-3 text-sm" data-testid="model-verdict" data-agrees={agrees}>
                   <div class="flex items-baseline justify-between gap-2">
                     <span class="font-semibold">Rook's model {agrees ? "agrees" : "isn't convinced"}</span>
-                    <span class="stat-num {m.gain >= 0 ? 'text-success' : 'text-error'}">{per100(m.gain)}<span class="text-xs font-normal text-base-content/60"> per 100</span></span>
+                    <span class="stat-num {m.gain >= 0 ? 'text-success' : 'text-error'}">{per100(m.gain)}<span class="text-xs font-normal text-base-content/60">&nbsp;per 100</span></span>
                   </div>
                   <ul class="mt-1.5 text-xs text-base-content/70 grid gap-1">
                     {#each m.reasons as r, i (i)}
