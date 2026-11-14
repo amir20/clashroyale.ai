@@ -167,7 +167,12 @@ Per-player questions (`player_profile`, `player_cards`) and `run_sql` read SQLit
 | `data/clash.db` | SQLite database, the source of truth | No |
 | `data/clash.db.snapshot/` | Parquet snapshot; rebuildable from the DB | No |
 | `data/.crawl.lock` | prevents two crawls at once | No |
+| `data/ml/` | exported battles, trained models, `model.json` for the server | No |
 | `src/crai/` | the code (see [Layout](#layout)) | Yes |
+
+### Deck models
+
+Rook also predicts who wins from the two decks, and explains its predictions card by card. How the models are built, trained, tested and used: [src/crai/ml/README.md](src/crai/ml/README.md).
 
 ## Layout
 
