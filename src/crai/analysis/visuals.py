@@ -5,7 +5,7 @@ reads instead of drawing anything. The model picks which one to show and names t
 figure on screen comes from here. `scope` tells the model whose numbers they are.
 """
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import polars as pl
@@ -16,15 +16,11 @@ from crai.analysis.analytics import (
     CardRef,
     DeckResult,
     Filters,
-    plays,
-    shared_cards,
-    special_count,
 )
 from crai.analysis.insights import (
-    CLOSE_SHARED_CARDS,
-    MEANINGFUL_GAIN,
     STATUS,
     Game,
+    SwapField,
     _cards,
     _ids,
     _played_as,
@@ -34,7 +30,6 @@ from crai.analysis.insights import (
     current_deck_key,
     elixir_standing,
     near_filters,
-    near_player,
     nemesis,
     record_against,
     slots,
@@ -42,7 +37,6 @@ from crai.analysis.insights import (
     trophy_scope,
     wins_and_losses,
 )
-from crai.collect.client import normalize_tag
 
 MIN_VISUAL_GAMES = 100
 MIN_DECK_PLAYERS = 20
@@ -65,31 +59,6 @@ def _where(items: list[Game] | None) -> tuple[Filters, str]:
         f"Other {trophy_scope(items or [])}, not this player's own games. "
         "Say 'players at your trophies'."
     )
-
-
-def _swap_pools(
-    a: Analyzer,
-    tag: str,
-    items: list[Game],
-    others: list[int],
-    first: int,
-    second: int,
-    n_special: int,
-) -> Iterator[tuple[pl.DataFrame, bool, int]]:
-    """Comparable decks running exactly one of the two cards, strictest selection first.
-
-    They fill as many Evolution/Hero slots as the player's deck does."""
-    has_first, has_second = (pl.col("cards").list.contains(c) for c in (first, second))
-    rest = (
-        a.decks()
-        .filter(pl.col("player_tag") != tag, has_first != has_second)
-        .with_columns(shared=shared_cards(others))
-        .filter(pl.col("shared") >= 4, special_count() == n_special)
-    )
-    near = near_player(rest, items)
-    for pool, is_near in [*([(near, True)] if near is not None else []), (rest, False)]:
-        for needed in (CLOSE_SHARED_CARDS, 4):
-            yield pool.filter(pl.col("shared") >= needed), is_near, needed
 
 
 def swap_view(
@@ -118,34 +87,21 @@ def swap_view(
             f"{cards[out_id]['name']}'s {form} slot. Compare it with one of their plain cards."
         }
 
-    def side(pool: pl.DataFrame, cid: int) -> dict[str, Any]:
-        running = pool.filter(plays(cid, slot))
-        rate = running["score"].mean() if running.height else None
-        played = [g for g in items if cid in _ids(g["deck_key"])]
+    n_special = sum(1 for s in played.values() if s)
+    field = SwapField(a, tag, items, others, n_special)
+    h2h = field.compare(out_id, in_id, slot)
+
+    def side(cid: int, games: int, players: int) -> dict[str, Any]:
+        own = [g for g in items if cid in _ids(g["deck_key"])]
         return _played_as(cards[cid], slot) | {
-            "games": running.height,
-            "players": running["player_tag"].n_unique() if running.height else 0,
-            "rate": rate,
-            "player_own_record_with_it": _record(played) if played else "never played it",
+            "games": games,
+            "players": players,
+            "player_own_record_with_it": _record(own) if own else "never played it",
         }
 
-    def enough(pool: pl.DataFrame) -> bool:
-        running = [pool.filter(plays(c, slot)).height for c in (out_id, in_id)]
-        return min(running) >= MIN_VISUAL_GAMES
-
-    n_special = sum(1 for s in played.values() if s)
-    pools = list(_swap_pools(a, normalize_tag(tag), items, others, out_id, in_id, n_special))
-    pool, near, needed = next((p for p in pools if enough(p[0])), pools[-1])
-    out_side, in_side = side(pool, out_id), side(pool, in_id)
-    verdict, gap = "unknown", None
-    out_rate, in_rate = out_side.pop("rate"), in_side.pop("rate")
-    if min(out_side["games"], in_side["games"]) >= MIN_VISUAL_GAMES:
-        diff = in_rate - out_rate
-        gap = round(diff, 3)
-        margin = 1.96 * (0.25 / out_side["games"] + 0.25 / in_side["games"]) ** 0.5
-        verdict = "even"
-        if abs(diff) > max(margin, MEANINGFUL_GAIN):
-            verdict = "better" if diff > 0 else "worse"
+    out_side = side(out_id, h2h.out_games, h2h.out_players)
+    in_side = side(in_id, h2h.in_games, h2h.in_players)
+    verdict, gap, near, needed = h2h.verdict, h2h.gap, h2h.near, h2h.needed
     slot_note = f", each card played as {STATUS[slot]}" if slot else ", both cards played plain"
     range_note = "within the player's trophy range" if near else "at all trophy levels"
     return {
@@ -154,7 +110,7 @@ def swap_view(
         "in": in_side,
         "verdict": verdict,
         "gap": gap,
-        "family_decks": pool.height,
+        "family_decks": h2h.decks,
         "near": near,
         "min_shared_cards": needed,
         "scope": (

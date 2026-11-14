@@ -133,3 +133,13 @@ def test_swap_view_refuses_a_card_without_that_form(slots_analyzer: Analyzer) ->
     items = insights.games(slots_analyzer, ME)
     view = visuals.swap_view(slots_analyzer, ME, items, "musketeer", "xbow")
     assert "no evolution form" in view["error"]
+
+
+def test_the_suggestion_quotes_the_swap_charts_number(slots_analyzer: Analyzer) -> None:
+    """The story card and the swap chart are the same comparison, so they can't disagree."""
+    items = insights.games(slots_analyzer, ME)
+    top = insights.replace_card(slots_analyzer, ME, items)["candidates"][0]
+    view = visuals.swap_view(slots_analyzer, ME, items, "musketeer", top["name"])
+    assert view["verdict"] == "better"
+    assert top["gain"] == view["gap"]
+    assert top["games"] == view["in"]["games"]

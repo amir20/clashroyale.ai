@@ -5,7 +5,7 @@ answers need no AI call and can't be hallucinated. `coach.py` turns these result
 """
 
 from collections import Counter, defaultdict
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass
 from math import ceil
 from statistics import median
@@ -19,6 +19,7 @@ from crai.analysis.analytics import (
     Analyzer,
     Filters,
     _margin,
+    plays,
     shared_cards,
     special_count,
     specials,
@@ -563,6 +564,101 @@ def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game], n_special
     return _near_stat(a, ("family", tag, tuple(sorted(mine)), n_special), items, pick)
 
 
+MIN_SWAP_GAMES = 100  # decks running each card, before a head-to-head says anything
+SHORTLIST = 8  # candidates checked head-to-head
+
+
+@dataclass(frozen=True)
+class HeadToHead:
+    """Decks sharing the player's other cards, running one of two cards in the same slot."""
+
+    out_games: int
+    in_games: int
+    out_players: int
+    in_players: int
+    out_rate: float | None
+    in_rate: float | None
+    gap: float | None  # in_rate - out_rate, once both sides have enough games
+    margin: float | None
+    verdict: str  # better / worse / even / unknown
+    decks: int
+    near: bool
+    needed: int  # shared cards every deck has
+
+
+class SwapField:
+    """Other players' decks a swap in the player's deck is judged on, built once per deck so
+    several candidates can be compared cheaply."""
+
+    def __init__(
+        self, a: Analyzer, tag: str, items: list[Game], others: list[int], n_special: int
+    ) -> None:
+        self._a, self._tag, self._items = a, normalize_tag(tag), items
+        self._others, self._n_special = others, n_special
+        self._near: pl.DataFrame | None = None
+        self._all: pl.DataFrame | None = None
+
+    def _alike(self, d: pl.DataFrame) -> pl.DataFrame:
+        return (
+            d.filter(pl.col("player_tag") != self._tag)
+            .with_columns(shared=shared_cards(self._others))
+            .filter(pl.col("shared") >= 4, special_count() == self._n_special)
+        )
+
+    def pools(self) -> Iterator[tuple[pl.DataFrame, bool]]:
+        """Near the player's trophies first, then at every trophy level (built only if needed)."""
+        if self._near is None:
+            field = near_player(self._a.decks(), self._items)
+            self._near = self._alike(field) if field is not None else pl.DataFrame()
+        if self._near.height:
+            yield self._near, True
+        if self._all is None:
+            self._all = self._alike(self._a.decks())
+        yield self._all, False
+
+    def compare(self, out_id: int, in_id: int, slot: int) -> HeadToHead:
+        """Both cards judged in the slot the leaving card fills."""
+        has_out, has_in = (pl.col("cards").list.contains(c) for c in (out_id, in_id))
+        chosen = None
+        for pool, near in self.pools():
+            one = pool.filter(has_out != has_in)
+            for needed in (CLOSE_SHARED_CARDS, 4):
+                p = one.filter(pl.col("shared") >= needed)
+                sides = [p.filter(plays(c, slot)) for c in (out_id, in_id)]
+                chosen = (p, sides, near, needed)
+                if min(s.height for s in sides) >= MIN_SWAP_GAMES:
+                    break
+            else:
+                continue
+            break
+        assert chosen is not None
+        p, (o, i), near, needed = chosen
+        out_rate = o["score"].mean() if o.height else None
+        in_rate = i["score"].mean() if i.height else None
+        verdict, gap, margin = "unknown", None, None
+        if min(o.height, i.height) >= MIN_SWAP_GAMES:
+            diff = float(in_rate) - float(out_rate)  # ty: ignore[invalid-argument-type]
+            gap = round(diff, 3)
+            margin = round(1.96 * (0.25 / o.height + 0.25 / i.height) ** 0.5, 3)
+            verdict = "even"
+            if abs(diff) > max(margin, MEANINGFUL_GAIN):
+                verdict = "better" if diff > 0 else "worse"
+        return HeadToHead(
+            out_games=o.height,
+            in_games=i.height,
+            out_players=o["player_tag"].n_unique() if o.height else 0,
+            in_players=i["player_tag"].n_unique() if i.height else 0,
+            out_rate=out_rate,  # ty: ignore[invalid-argument-type]
+            in_rate=in_rate,  # ty: ignore[invalid-argument-type]
+            gap=gap,
+            margin=margin,
+            verdict=verdict,
+            decks=p.height,
+            near=near,
+            needed=needed,
+        )
+
+
 def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
     """How much comparable evidence there is for this player's current deck."""
     tag = normalize_tag(tag)
@@ -644,7 +740,9 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
     def fits(cid: int) -> bool:
         return can_play(cards[cid], slot) and (owned is None or owned.get(cid, 0) & slot == slot)
 
-    candidates = sorted(
+    # Cards that do well in decks like theirs. "With vs without" only says a card's decks win;
+    # whether it beats the card it would replace is the head-to-head below.
+    shortlist = sorted(
         (
             row(r)
             for r in per
@@ -656,9 +754,28 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
             and r["players"] >= MIN_CANDIDATE_PLAYERS
             and r["gain"] > max(r["margin"], MEANINGFUL_GAIN)
         ),
-        key=lambda r: r["gain"] - r["margin"],  # rank by what we can be confident of
+        key=lambda r: r["gain"] - r["margin"],
         reverse=True,
-    )
+    )[:SHORTLIST]
+    candidates = []
+    if weakest and shortlist:
+        others = [c for c in mine if c != weakest["id"]]
+        field = SwapField(a, tag, items, others, sum(1 for s in played.values() if s))
+        for c in shortlist:
+            h2h = field.compare(weakest["id"], c["id"], slot)
+            if h2h.verdict != "better" or h2h.gap is None or h2h.margin is None:
+                continue
+            candidates.append(
+                c
+                | {
+                    "gain": h2h.gap,  # the same number the swap chart shows
+                    "margin": h2h.margin,
+                    "games": h2h.in_games,
+                    "players": h2h.in_players,
+                    "real": True,
+                }
+            )
+        candidates.sort(key=lambda r: r["gain"] - r["margin"], reverse=True)
     return {
         "enough": True,
         "family_decks": n,
@@ -666,7 +783,7 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         "min_shared_cards": family.min_shared,
         "family_players": fam["player_tag"].n_unique(),
         "yours": yours,
-        "candidates": candidates[:4],
+        "candidates": candidates[:4],  # gain = head-to-head against `weakest`
         "tested": len({r["card_id"] for r in per if r["card_id"] not in mine}),
         "weakest": weakest,
         "slot": STATUS.get(slot),  # the weakest card's slot, which every candidate fits
