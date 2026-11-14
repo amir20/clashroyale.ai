@@ -49,8 +49,11 @@ def load(path: Path) -> tuple[dict[str, Split], int]:
     df = pl.read_parquet(path)
     vocab = json.loads(path.with_suffix(".vocab.json").read_text())
     vocab_size = max(vocab.values()) + FORMS
-    days = df["day"].unique().sort().to_list()
-    test_day, val_day = days[-1], days[-2]
+    per_day = df.group_by("day").len().sort("day")
+    # A day still being crawled has a fraction of the battles: test on full days only.
+    full = per_day.filter(pl.col("len") >= per_day["len"].max() / 4)["day"].to_list()
+    test_day, val_day = full[-1], full[-2]
+    df = df.filter(pl.col("day") <= test_day)
 
     def split(part: pl.DataFrame) -> Split:
         def side(col: str) -> Tensor:
