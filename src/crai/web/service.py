@@ -171,6 +171,7 @@ class Service:
         story = self.story(tag, items, laps)
         with laps.lap("model"):
             model = self.model(tag, items, story["replace"])
+        story["lines"]["pick"] = voice.model_pick(model["pick"]) if model else None
         with laps.lap("cards"):
             cards = insights.playable_cards(a)
         log.info("report %s in %.2fs (%s)", tag, laps.total, laps)

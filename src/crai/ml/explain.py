@@ -20,9 +20,11 @@ log-odds; the page shows them as about how many wins per 100 games.
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+lazy import polars as pl
 
 from crai.analysis import insights
 from crai.analysis.analytics import Analyzer, variants
@@ -41,6 +43,7 @@ class Model:
     pair: dict[tuple[int, int], float]
     vs: dict[tuple[int, int], float]
     about: dict[str, Any]
+    games: list[int] = field(default_factory=list)  # training battles per token
 
     def token(self, v: int) -> int:
         """The token of a card as played (card id * 10 + Evolution/Hero level)."""
@@ -86,6 +89,7 @@ def load(path: Path) -> Model | None:
         pair={(int(x), int(y)): w for x, y, w in raw["pair"]},
         vs={(int(x), int(y)): w for x, y, w in raw["vs"]},
         about=raw["about"],
+        games=raw.get("games", []),
     )
     _cache[path] = (mtime, model)
     return model
@@ -101,9 +105,10 @@ class Field:
     card_avg: float  # the average deck's card weights, per card
     pair_avg: float  # the average deck's pair weights, per card
     near: bool
+    m: dict[int, float] = field(default_factory=dict)  # token -> average matchups vs the field
 
 
-def field(a: Analyzer, model: Model, items: list[insights.Game]) -> Field | None:
+def field_for(a: Analyzer, model: Model, items: list[insights.Game]) -> Field | None:
     def build() -> Field | None:
         decks = insights.near_player(a.decks(), items)
         near = decks is not None and decks.height >= MIN_FIELD_DECKS
@@ -143,7 +148,16 @@ def win_chance(model: Model, deck: list[int], f: Field) -> float:
 
 
 def _matchups(model: Model, t: int, f: Field) -> float:
-    return sum(s * model.counter(t, y) for y, s in f.share.items())
+    if t not in f.m:
+        f.m[t] = sum(s * model.counter(t, y) for y, s in f.share.items())
+    return f.m[t]
+
+
+def edge(model: Model, deck: list[int], f: Field) -> float:
+    """The deck's average log-odds against the field, up to a constant: cheap (36 lookups plus
+    cached matchups), so thousands of candidate decks can be ranked. Exact for comparing decks
+    in log-odds; win chance comes from `win_chance`."""
+    return model.own(deck) + sum(_matchups(model, t, f) for t in deck)
 
 
 def shares(model: Model, deck: list[int], f: Field) -> list[dict[str, float]]:
@@ -276,6 +290,155 @@ def about(model: Model) -> dict[str, Any]:
     return model.about | {"pairs": len(model.pair), "matchups": len(model.vs)}
 
 
+MIN_TOKEN_GAMES = 5000  # the model has to have seen a card this often to recommend it
+# ...and players with the player's core have to run it this often: the model adds up what it
+# learned, so for a combination nobody plays it would happily extrapolate. Keeping to cards that
+# real decks with the core use keeps its suggestions to decks it knows something about.
+MIN_CORE_CARD_GAMES = 200
+MIN_STEP = 0.5  # wins per 100: a swap smaller than this isn't worth suggesting
+ALTERNATIVES = 3
+MAX_SWAPS = 2  # more is a different deck: harder to try, and further from what the model knows
+
+
+def _options(
+    model: Model,
+    cards: dict[int, dict[str, Any]],
+    owned: dict[int, int] | None,
+    taken: set[int],
+    slot: int,
+    allowed: set[int] | None = None,
+) -> list[tuple[int, int]]:
+    """(variant, token) of every card that can take a slot played as `slot` (0 plain, 1 Evo,
+    2 Hero, 3 both): owned, not already in the deck, and seen often enough by the model. A card
+    in an Evolution or Hero slot can also go in plain."""
+    out = []
+    for cid, card in cards.items():
+        first = model.first.get(cid)
+        if first is None or cid in taken or (owned is not None and cid not in owned):
+            continue
+        for form in {0, slot}:
+            if form and not (
+                insights.can_play(card, form) and (owned is None or owned[cid] & form == form)
+            ):
+                continue
+            t = first + form
+            if allowed is not None and cid * 10 + form not in allowed:
+                continue
+            if model.games and model.games[t] < MIN_TOKEN_GAMES:
+                continue
+            out.append((cid * 10 + form, t))
+    return out
+
+
+def _champion(cards: dict[int, dict[str, Any]], v: int) -> bool:
+    return str(cards.get(v // 10, {}).get("rarity") or "").lower() == "champion"
+
+
+def recommend(
+    model: Model,
+    f: Field,
+    mine: list[int],
+    flex: list[int],
+    cards: dict[int, dict[str, Any]],
+    owned: dict[int, int] | None,
+    allowed: set[int] | None = None,
+) -> dict[str, Any] | None:
+    """The model's own suggestion: swap flex cards one at a time, each time for the owned card
+    that raises the deck's edge against the field most, while a swap adds at least MIN_STEP wins
+    per 100. Core cards stay. Returns the package, the steps, and the best single swaps."""
+    deck = list(mine)
+    p0 = win_chance(model, [model.token(v) for v in deck], f)
+    slope = p0 * (1 - p0) * 100  # log-odds -> wins per 100, near the deck's win chance
+    free = [v for v in deck if v in flex]
+    steps: list[dict[str, Any]] = []
+    singles: dict[int, tuple[float, int]] = {}  # first round: best replacement per flex card
+    while free and len(steps) < MAX_SWAPS:
+        cur = edge(model, [model.token(v) for v in deck], f)
+        taken = {v // 10 for v in deck}
+        best: tuple[float, int, int] | None = None
+        for out_v in free:
+            rest = [v for v in deck if v != out_v]
+            rest_t = [model.token(v) for v in rest]
+            has_champion = any(_champion(cards, v) for v in rest)
+            for v, t in _options(model, cards, owned, taken, out_v % 10, allowed):
+                if has_champion and _champion(cards, v):
+                    continue
+                e = edge(model, [*rest_t, t], f)
+                if best is None or e > best[0]:
+                    best = (e, out_v, v)
+                if not steps and (out_v not in singles or e > singles[out_v][0]):
+                    singles[out_v] = (e, v)
+        if best is None or (best[0] - cur) * slope < MIN_STEP:
+            break
+        e, out_v, v = best
+        steps.append(
+            {
+                "out": insights._as_card(cards, out_v),
+                "in": insights._as_card(cards, v),
+                "gain": round((e - cur) * slope, 1),
+            }
+        )
+        deck = [x for x in deck if x != out_v] + [v]
+        free.remove(out_v)
+    if not steps:
+        return None
+    dropped = [v for v in mine if v not in deck]
+    added = [v for v in deck if v not in mine]
+    verdict = package_view(model, f, mine, dropped, added, cards)
+    base = edge(model, [model.token(v) for v in mine], f)
+    alternatives: list[dict[str, Any]] = sorted(
+        (
+            {
+                "out": insights._as_card(cards, out_v),
+                "in": insights._as_card(cards, v),
+                "gain": round((e - base) * slope, 1),
+            }
+            for out_v, (e, v) in singles.items()
+        ),
+        key=lambda r: -r["gain"],
+    )
+    return {
+        "win": round(p0, 3),
+        "win_after": verdict["win"],
+        "gain": verdict["gain"],
+        "out": [insights._as_card(cards, v) for v in dropped],
+        "in": [insights._as_card(cards, v) for v in added],
+        "steps": steps,
+        "reasons": verdict["reasons"],
+        "parts": verdict["parts"],
+        "singles": [r for r in alternatives if r["gain"] >= MIN_STEP][:ALTERNATIVES],
+        "dropped": dropped,
+        "added": added,
+    }
+
+
+def _check(a: Analyzer, tag: str, items: list[insights.Game], pick: dict[str, Any]) -> dict | None:
+    """What battle data says about the model's pick: players with the same core who made the
+    same swap, against those who kept the player's cards. None without a core."""
+    arch = insights.archetype(a, tag, items)
+    if arch is None:
+        return None
+    h2h = insights.package(arch, items, pick["dropped"], pick["added"])
+    return {
+        "verdict": h2h.verdict,  # better / worse / even / unknown (too few games)
+        "gain": round(h2h.gap * 100, 1) if h2h.gap is not None else None,
+        "margin": round(h2h.margin * 100, 1) if h2h.margin is not None else None,
+        "games": h2h.in_games,
+        "players": h2h.in_players,
+        "near": h2h.near,
+    }
+
+
+def _core_cards(a: Analyzer, tag: str, items: list[insights.Game]) -> set[int] | None:
+    """Cards (as played) that decks with the player's core run often enough. None when the core
+    isn't known: then any card the model has seen enough can be suggested."""
+    arch = insights.archetype(a, tag, items)
+    if arch is None:
+        return None
+    counts = arch.decks.select(pl.col("v").explode()).group_by("v").len()
+    return set(counts.filter(pl.col("len") >= MIN_CORE_CARD_GAMES)["v"].to_list())
+
+
 def report(
     a: Analyzer,
     path: Path,
@@ -283,13 +446,14 @@ def report(
     items: list[insights.Game],
     replace: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """The model's part of a report, adding its verdict to each swap. None without a model or
-    a current deck."""
+    """The model's part of a report: the deck's breakdown, the model's own swap suggestion
+    (checked against battle data), and its verdict on the battle data's swaps. None without a
+    model or a current deck."""
     model = load(path)
     key = insights.current_deck_key(items)
     if model is None or key is None:
         return None
-    f = field(a, model, items)
+    f = field_for(a, model, items)
     if f is None:
         return None
     played = insights.slots(a, tag, items)
@@ -304,9 +468,18 @@ def report(
             [x["id"] * 10 + _level(x) for x in c["in"]],
             cards,
         )
+    # Only flex cards are swapped; without a known core, any card.
+    core = {x["id"] * 10 + _level(x) for x in replace.get("core") or []}
+    flex = [v for v in mine if v not in core]
+    pick = recommend(
+        model, f, mine, flex, cards, insights.unlocked(a, tag), _core_cards(a, tag, items)
+    )
+    if pick:
+        pick["check"] = _check(a, tag, items, pick)
+        del pick["dropped"], pick["added"]
     view = deck_view(model, f, mine, cards)
     view["field"]["scope"] = insights.trophy_scope(items) if f.near else "all players"
-    return view | {"about": about(model)}
+    return view | {"pick": pick, "about": about(model)}
 
 
 LEVEL = {None: 0, "evolution": 1, "hero": 2, "both": 3}

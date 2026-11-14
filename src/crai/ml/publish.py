@@ -52,6 +52,19 @@ def publish(checkpoint: Path, data: Path, out: Path) -> dict[str, Any]:
         "calibration": round(full.calibration, 4),
         "strength_accuracy": round(alone.accuracy, 4),
     }
+    # How many training battles each token was played in: the server won't recommend a card the
+    # model has barely seen, whose weights are mostly guesswork.
+    seen = (
+        pl.scan_parquet(data)
+        .select(t=pl.concat_list("a", "b"))
+        .explode("t")
+        .group_by("t")
+        .len()
+        .collect()
+    )
+    games = [0] * vocab_size
+    for t, n in seen.iter_rows():
+        games[t] = n
     model_json = {
         "about": about,
         "vocab": json.loads(data.with_suffix(".vocab.json").read_text()),
@@ -59,6 +72,7 @@ def publish(checkpoint: Path, data: Path, out: Path) -> dict[str, Any]:
         "card": [round(float(w), 5) for w in st["card.weight"].squeeze(1)],
         "pair": _table(st["pair.weight"], vocab_size),
         "vs": _table(st["vs.weight"], vocab_size),
+        "games": games,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(model_json, separators=(",", ":")))

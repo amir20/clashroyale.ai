@@ -46,7 +46,7 @@
     ...(s.close ? ["close"] : []),
     ...(s.worst ? ["worst"] : []),
     ...(s.elixir ? ["elixir"] : []),
-    ...(s.replace.enough && !them ? ["try"] : []),
+    ...((s.replace.enough || report.model?.pick) && !them ? ["try"] : []),
     ...(them ? [] : ["goals"]),
   ]);
   const your = $derived(them ? "their" : "your");
@@ -286,45 +286,80 @@
             {#if !them}{@render says(s.lines.elixir ?? "")}{/if}
             <Visual visual={s.elixir} {them} />
           {:else if id === "try"}
+            {@const pick = report.model?.pick}
             {@const weak = s.replace.weakest}
             {@const swap = s.replace.candidates[0]}
-            <h2 class="text-2xl lg:text-3xl">{swap || weak?.real ? "One thing to try" : "Anything to change?"}</h2>
-            {@render says(report.story.lines.replace)}
-            {#if swap}
-              <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
-                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.out as c (c.id)}<div class={swap.out.length > 2 ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, swap.out.length > 2 ? undefined : c.name, c.status)}</div>{/each}</div>
+            {#if pick}
+              {@const big = Math.max(pick.out.length, pick.in.length) > 2}
+              <h2 class="text-2xl lg:text-3xl">One thing to try</h2>
+              {@render says(s.lines.pick ?? "")}
+              <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3" data-testid="model-pick">
+                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each pick.out as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
                 <Icon name="swap" class="w-6 h-6 text-primary" />
-                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.in as c (c.id)}<div class={swap.in.length > 2 ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, swap.in.length > 2 ? undefined : c.name, c.status)}</div>{/each}</div>
-                <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks built on your core</span></div>
-                {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
+                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each pick.in as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
+                <div class="col-span-3 text-center">
+                  <div class="stat-num text-2xl"><span class="text-base-content/60">{Math.round(pick.win * 100)}%</span> → <span class="text-success">{Math.round(pick.win_after * 100)}%</span></div>
+                  <div class="text-xs text-base-content/60">predicted win chance at {your} trophies · {per100(pick.gain)} wins per 100</div>
+                </div>
               </div>
-              {#if swap.model}
-                {@const m = swap.model}
-                {@const agrees = (m.gain > 0) === (swap.gain > 0)}
-                <div class="rounded-xl border border-base-content/10 p-3 text-sm" data-testid="model-verdict" data-agrees={agrees}>
-                  <div class="flex items-baseline justify-between gap-2">
-                    <span class="font-semibold">Rook's model {agrees ? "agrees" : "isn't convinced"}</span>
-                    <span class="stat-num {m.gain >= 0 ? 'text-success' : 'text-error'}">{per100(m.gain)}<span class="text-xs font-normal text-base-content/60">&nbsp;per 100</span></span>
-                  </div>
-                  <ul class="mt-1.5 text-xs text-base-content/70 grid gap-1">
-                    {#each m.reasons as r, i (i)}
-                      <li>
-                        {#if r.kind === "synergy"}
-                          {r.how === "gained" ? "Gains" : "Loses"} {r.cards.map(named).join(" + ")} working together ({per100(r.effect)})
-                        {:else}
-                          {r.effect > 0 ? "Better" : "Worse"} against {named(r.card)}, in {Math.round(r.share * 100)}% of decks ({per100(r.effect)})
-                        {/if}
+              <div class="text-sm grid gap-1.5" data-testid="model-why">
+                <h3 class="font-semibold">Why</h3>
+                <ul class="grid gap-1 text-base-content/75">
+                  {#if pick.steps.length > 1}
+                    {#each pick.steps as st, i (i)}<li>{named(st.in)} instead of {named(st.out)}: {per100(st.gain)}</li>{/each}
+                  {/if}
+                  {#each pick.reasons as r, i (i)}
+                    <li>
+                      {#if r.kind === "synergy"}
+                        {r.how === "gained" ? "New combo" : "Loses a combo"}: {r.cards.map(named).join(" + ")} ({per100(r.effect)})
+                      {:else}
+                        {r.effect > 0 ? "Better" : "Worse"} against {named(r.card)}, which {Math.round(r.share * 100)}% of decks at {your} trophies run ({per100(r.effect)})
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+                {#if pick.check}
+                  {@const c = pick.check}
+                  <p class="text-xs mt-1 {c.verdict === 'better' ? 'text-success' : c.verdict === 'worse' ? 'text-warning' : 'text-base-content/60'}" data-testid="model-check" data-verdict={c.verdict}>
+                    {#if c.verdict === "better"}✓ Real games agree: {per100(c.gain ?? 0)} per 100 for players with {your} core who did it ({c.games.toLocaleString()} games)
+                    {:else if c.verdict === "worse"}⚠ Real games disagree: {per100(c.gain ?? 0)} per 100 for players with {your} core who did it ({c.games.toLocaleString()} games)
+                    {:else if c.verdict === "even"}Real games: about the same for players who did it ({c.games.toLocaleString()} games)
+                    {:else}Not enough players with {your} core have tried this to check it against real games{/if}
+                  </p>
+                {/if}
+              </div>
+              {#if pick.singles.length > 1}
+                <div class="text-sm">
+                  <h3 class="font-semibold mb-1.5">Or just one card</h3>
+                  <ul class="grid gap-1.5">
+                    {#each pick.singles as o, i (i)}
+                      <li class="flex items-center gap-2">
+                        <div class="w-8">{@render tile(o.out)}</div><span class="text-primary" aria-hidden="true">→</span><div class="w-8">{@render tile(o.in)}</div>
+                        <span class="text-xs text-base-content/70 flex-1 min-w-0 truncate">{named(o.in)} for {named(o.out)}</span>
+                        <span class="stat-num text-sm text-success">{per100(o.gain)}</span>
                       </li>
                     {/each}
-                    <li class="text-base-content/50">Cards on their own {per100(m.parts.alone)} · together {per100(m.parts.synergy)} · matchups {per100(m.parts.matchups)}</li>
                   </ul>
-                  <button class="mt-1.5 text-xs link link-primary cursor-pointer" onclick={() => (how = true)}>How does the model work?</button>
                 </div>
               {/if}
-            {:else if weak}
-              <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-1 items-center gap-3">
-                <div class="w-20 mx-auto">{@render tile(weak, weak.name)}</div>
-              </div>
+              <button class="text-xs link link-primary cursor-pointer w-fit" onclick={() => (how = true)}>How does Rook predict this?</button>
+            {:else}
+              <h2 class="text-2xl lg:text-3xl">{swap || weak?.real ? "One thing to try" : "Anything to change?"}</h2>
+              {@render says(report.model ? `My model can't find a card you own that beats your flex cards. ${report.story.lines.replace}` : report.story.lines.replace)}
+              {#if swap}
+                {@const big = Math.max(swap.out.length, swap.in.length) > 2}
+                <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+                  <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.out as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
+                  <Icon name="swap" class="w-6 h-6 text-primary" />
+                  <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.in as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
+                  <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks built on your core</span></div>
+                  {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
+                </div>
+              {:else if weak}
+                <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-1 items-center gap-3">
+                  <div class="w-20 mx-auto">{@render tile(weak, weak.name)}</div>
+                </div>
+              {/if}
             {/if}
             {#if s.replace.core}
               <div class="mt-3 text-xs text-base-content/60 text-center lg:text-left" data-testid="core">

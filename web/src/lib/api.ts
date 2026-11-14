@@ -30,6 +30,19 @@ export type ModelView = {
   synergy: { cards: Played[]; effect: number }[];
   clash: { cards: Played[]; effect: number }[];
   field: { decks: number; near: boolean; scope: string };
+  /** The model's own suggestion: flex swaps that raise the predicted win chance most. */
+  pick: {
+    win: number;
+    win_after: number;
+    gain: number;
+    out: Played[];
+    in: Played[];
+    steps: { out: Played; in: Played; gain: number }[];
+    reasons: ModelVerdict["reasons"];
+    parts: ModelVerdict["parts"];
+    singles: { out: Played; in: Played; gain: number }[];
+    check: { verdict: "better" | "worse" | "even" | "unknown"; gain: number | null; margin: number | null; games: number; players: number; near: boolean } | null;
+  } | null;
   about: {
     published: string;
     battles: number;
@@ -75,7 +88,7 @@ export type Report = {
     elixir: any | null;
     replace: any;
     surprises: (Record<string, any> & { kind: string; headline: string; detail: string })[];
-    lines: { trend: string | null; close: string | null; worst: string | null; elixir: string | null; replace: string };
+    lines: { trend: string | null; close: string | null; worst: string | null; elixir: string | null; replace: string; pick?: string | null };
   };
   cards: Card[];
   questions: { id: string; label: string }[];

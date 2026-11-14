@@ -220,6 +220,34 @@ def try_line(r: dict[str, Any]) -> str:
     return f"None of your cards is hurting you. {pop}".strip()
 
 
+def model_pick(m: dict[str, Any] | None) -> str | None:
+    """Rook's line for the deck model's own suggestion, with what battle data says about it."""
+    if not m:
+        return None
+    swaps = " and ".join(f"{_as_played(x['out'])} for {_as_played(x['in'])}" for x in m["steps"])
+    head = (
+        f"Swap {swaps}. Against the decks at your trophies, my model has you at "
+        f"{_pct(m['win'])} now and {_pct(m['win_after'])} after: about {m['gain']:.1f} more "
+        "wins per 100."
+    )
+    check = m.get("check")
+    if not check or check["verdict"] == "unknown":
+        tail = "Too few players with your core have tried it to check it against real games."
+    elif check["verdict"] == "better":
+        tail = (
+            f"Real games agree: players with your core who did it won {check['gain']:.1f} more "
+            f"per 100 ({check['games']:,} games)."
+        )
+    elif check["verdict"] == "worse":
+        tail = (
+            f"But players with your core who did it won {abs(check['gain']):.1f} fewer per 100 "
+            f"({check['games']:,} games), so I'd hold off."
+        )
+    else:
+        tail = f"Players with your core who did it won about as often ({check['games']:,} games)."
+    return f"{head} {tail}"
+
+
 def best_cards(r: dict[str, Any]) -> str:
     best = r["best"]
     if best is None:

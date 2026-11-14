@@ -244,6 +244,31 @@ compares the two win chances. It then picks the biggest reasons:
 - the pair that changed most, a synergy gained or lost;
 - the opponent card the swap handles most differently, weighted by how common it is.
 
+## 5. Recommendations
+
+The swap card shows the model's own suggestion ([`explain.recommend`](explain.py)):
+
+```mermaid
+flowchart TB
+    D["your deck"] --> F{"flex cards<br/>(core stays)"}
+    F --> O["for each flex card:<br/>try every card you own that fits the slot<br/>(Evo/Hero slot: that form if unlocked, or plain)"]
+    O --> G{"is it a card players<br/>with your core run<br/>(200+ games) and the model<br/>has seen (5,000+ games)?"}
+    G -- no --> X["skip"]
+    G -- yes --> S["score the new deck:<br/>edge vs the field<br/>(36 lookups + cached matchups)"]
+    S --> B["take the best swap<br/>if it adds 0.5+ wins per 100"]
+    B -- "up to 2 swaps" --> O
+    B --> C["check with battle data:<br/>players with your core who made<br/>the same swap vs those who didn't"]
+```
+
+- **Greedy, one swap at a time.** Each step takes the swap that raises the deck's edge most,
+  until nothing adds half a win per 100, up to two swaps.
+- **Kept to real decks.** The model adds up what it learned, so for a combination nobody plays
+  it would extrapolate happily: it once proposed four cards for "+12 per 100". Candidate cards
+  must be ones players with the same core actually run, and ones the model has seen often.
+- **Checked against battle data.** The same core-based head-to-head as the data's own
+  suggestions. "Unknown" means too few players have made that exact swap to say.
+- **Alternatives.** The best single-card swap for each flex card is listed too.
+
 ## Retraining
 
 ```sh

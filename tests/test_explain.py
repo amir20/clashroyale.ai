@@ -20,6 +20,7 @@ def small_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(insights, "MIN_CORE_GAMES", 400)
     monkeypatch.setattr(insights, "MIN_CORE_PLAYERS", 50)
     monkeypatch.setattr(insights, "MIN_PACKAGE_PLAYERS", 10)
+    monkeypatch.setattr(explain, "MIN_CORE_CARD_GAMES", 50)
 
 
 @pytest.fixture
@@ -66,7 +67,7 @@ def test_card_shares_add_up_to_the_decks_edge(analyzer: Analyzer, model_path: Pa
     model = explain.load(model_path)
     assert model is not None
     items = insights.games(analyzer, ME)
-    f = explain.field(analyzer, model, items)
+    f = explain.field_for(analyzer, model, items)
     assert f is not None
     deck = [model.token(c * 10) for c in (*CORE, MUSKETEER, KNIGHT, PEKKA)]
     edge = sum(sum(s.values()) for s in explain.shares(model, deck, f))
@@ -92,3 +93,48 @@ def test_the_report_explains_the_deck_and_each_swap(analyzer: Analyzer, model_pa
     synergy = next(r for r in verdict["reasons"] if r["kind"] == "synergy")
     assert {c["id"] for c in synergy["cards"]} == {HOG, PEKKA}
     assert synergy["how"] == "gained"
+
+
+def test_the_model_picks_its_own_swap_and_battle_data_checks_it(
+    analyzer: Analyzer, model_path: Path
+) -> None:
+    """Cannon is the weakest card and P.E.K.K.A the strongest one the player owns that works
+    with Hog: the model swaps them, only them (no other swap helps), and never a core card."""
+    items = insights.games(analyzer, ME)
+    replace = insights.replace_card(analyzer, ME, items)
+    view = explain.report(analyzer, model_path, ME, items, replace)
+    assert view is not None
+    pick = view["pick"]
+    assert [c["id"] for c in pick["out"]] == [CANNON]
+    assert [c["id"] for c in pick["in"]] == [PEKKA]
+    assert pick["gain"] > 0 and pick["win_after"] > pick["win"]
+    assert not {c["id"] for c in pick["out"]} & set(CORE)
+    assert pick["check"]["verdict"] == "better"  # players who made that swap did win more
+    assert pick["singles"][0]["in"]["id"] == PEKKA
+
+
+def test_the_model_only_suggests_cards_it_has_seen_enough(
+    analyzer: Analyzer, model_path: Path
+) -> None:
+    raw = json.loads(model_path.read_text())
+    raw["games"] = [0] * len(raw["card"])  # never seen anything: nothing to suggest
+    model_path.write_text(json.dumps(raw))
+    items = insights.games(analyzer, ME)
+    view = explain.report(
+        analyzer, model_path, ME, items, insights.replace_card(analyzer, ME, items)
+    )
+    assert view is not None
+    assert view["pick"] is None
+
+
+def test_the_model_only_suggests_cards_players_with_the_core_run(
+    analyzer: Analyzer, model_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P.E.K.K.A is the model's favorite, but if too few decks with the core run it, it's out."""
+    monkeypatch.setattr(explain, "MIN_CORE_CARD_GAMES", 1000)
+    items = insights.games(analyzer, ME)
+    view = explain.report(
+        analyzer, model_path, ME, items, insights.replace_card(analyzer, ME, items)
+    )
+    assert view is not None
+    assert view["pick"] is None
