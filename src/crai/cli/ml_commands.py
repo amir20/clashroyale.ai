@@ -29,7 +29,9 @@ def export_cmd(
 @ml.command("train")
 def train_cmd(
     data: DataOpt = Path("data/ml/battles.parquet"),
-    kind: Annotated[str, typer.Option(help="decknet or baseline")] = "decknet",
+    kind: Annotated[
+        str, typer.Option(help="decknet, baseline, or strength (levels and trophies only)")
+    ] = "decknet",
     epochs: int = 4,
     batch: int = 4096,
     lr: float = 2e-3,

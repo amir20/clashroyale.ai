@@ -1,4 +1,7 @@
-"""Win-probability models: P(deck A beats deck B | mode and trophy bucket).
+"""Win-probability models: P(deck A beats deck B | mode, trophy bucket, level and trophy gaps).
+
+The level and trophy gaps are inputs so the deck models don't learn account strength from the
+decks (Evolutions come with progress; strong players run particular decks).
 
 Both are antisymmetric by construction: logit(A, B) = s(A, B) - s(B, A), so P(A beats B) is
 always 1 - P(B beats A), whichever side a battle lists first.
@@ -16,6 +19,7 @@ from torch import Tensor, nn
 from crai.ml.data import BUCKETS, PAD
 
 CONTEXTS = 3 * BUCKETS  # mode (0-2) x bucket
+STRENGTH = 2  # level gap, trophy gap: see crai.ml.data.strength
 
 
 class Baseline(nn.Module):
@@ -31,6 +35,7 @@ class Baseline(nn.Module):
         self.vs = nn.Embedding(self.HASH, 1)
         for e in (self.card, self.pair, self.vs):
             nn.init.zeros_(e.weight)
+        self.strength = nn.Linear(STRENGTH, 1, bias=False)  # odd in x: antisymmetric
         i, j = torch.triu_indices(8, 8, offset=1)
         self.register_buffer("i", i, persistent=False)
         self.register_buffer("j", j, persistent=False)
@@ -44,8 +49,8 @@ class Baseline(nn.Module):
         vs = self.vs(cross.flatten(1) % self.HASH).squeeze(-1).sum(1)
         return cards + pairs + vs
 
-    def forward(self, a: Tensor, b: Tensor, ctx: Tensor) -> Tensor:
-        return self._score(a, b) - self._score(b, a)
+    def forward(self, a: Tensor, b: Tensor, ctx: Tensor, x: Tensor) -> Tensor:
+        return self._score(a, b) - self._score(b, a) + self.strength(x).squeeze(-1)
 
 
 class DeckNet(nn.Module):
@@ -60,7 +65,10 @@ class DeckNet(nn.Module):
         self.mix = nn.TransformerEncoder(block, layers, enable_nested_tensor=False)
         self.ctx = nn.Embedding(CONTEXTS, dim)
         self.head = nn.Sequential(
-            nn.Linear(dim * 4, dim * 2), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 2, 1)
+            nn.Linear(dim * 4 + STRENGTH, dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * 2, 1),
         )
 
     def deck(self, t: Tensor) -> Tensor:
@@ -70,9 +78,21 @@ class DeckNet(nn.Module):
         w = real.unsqueeze(-1).float()
         return (x * w).sum(1) / w.sum(1).clamp(min=1)
 
-    def _score(self, da: Tensor, db: Tensor, c: Tensor) -> Tensor:
-        return self.head(torch.cat([da, db, da * db, c], -1)).squeeze(-1)
+    def _score(self, da: Tensor, db: Tensor, c: Tensor, x: Tensor) -> Tensor:
+        return self.head(torch.cat([da, db, da * db, c, x], -1)).squeeze(-1)
 
-    def forward(self, a: Tensor, b: Tensor, ctx: Tensor) -> Tensor:
+    def forward(self, a: Tensor, b: Tensor, ctx: Tensor, x: Tensor) -> Tensor:
         da, db, c = self.deck(a), self.deck(b), self.ctx(ctx)
-        return self._score(da, db, c) - self._score(db, da, c)
+        return self._score(da, db, c, x) - self._score(db, da, c, -x)
+
+
+class Strength(nn.Module):
+    """No decks at all: only card levels and trophies. What the deck models must beat to show
+    the deck itself matters."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.f = nn.Sequential(nn.Linear(STRENGTH, 16), nn.GELU(), nn.Linear(16, 1))
+
+    def forward(self, a: Tensor, b: Tensor, ctx: Tensor, x: Tensor) -> Tensor:
+        return (self.f(x) - self.f(-x)).squeeze(-1)

@@ -226,3 +226,9 @@ def test_an_outdated_snapshot_is_read_then_rebuilt(db_path: Path) -> None:
     assert old.height == 400 and old["specials"].null_count() == 400
     assert snapshot.sync(db_path) == 400  # rebuilt with the new columns
     assert (d / ".format").read_text() == str(snapshot.FORMAT)
+
+
+def test_decks_carry_their_average_card_level(db_path: Path) -> None:
+    _, decks = snapshot.read(db_path)
+    # Every fixture card is one below its rarity's max: 15 on the in-game scale (16 = max).
+    assert decks["level"].unique().to_list() == [15.0]

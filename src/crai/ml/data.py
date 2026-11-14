@@ -54,11 +54,21 @@ def context() -> pl.Expr:
     return (mode * BUCKETS + bucket.fill_null(0)).cast(pl.Int16)
 
 
+def strength() -> list[pl.Expr]:
+    """What says how strong the two accounts are, apart from the decks: A's average card level
+    minus B's, and the trophy gap in thousands (0 when either is unknown, as in ranked)."""
+    return [
+        (pl.col("la") - pl.col("lb")).fill_null(0).alias("dlevel"),
+        ((pl.col("ta") - pl.col("tb")) / 1000).fill_null(0).alias("dtrophies"),
+    ]
+
+
 def export(db_path: Path, out: Path, days: int = 8) -> int:
     """Write battles from the last `days` days to `out` (Parquet) and the vocabulary next to it.
 
-    Columns: day, ctx (mode + trophy bucket of side A), a and b (8 tokens each), y (1.0 if A
-    won, 0.0 if B won; draws are dropped). Returns the number of battles written.
+    Columns: day, ctx (mode + trophy bucket of side A), a and b (8 tokens each), la and lb
+    (average card level), ta and tb (trophies), y (1.0 if A won, 0.0 if B won; draws are
+    dropped). Returns the number of battles written.
     """
     vocab = vocabulary(db_path)
 
@@ -71,17 +81,34 @@ def export(db_path: Path, out: Path, days: int = 8) -> int:
             "side",
             "score",
             pl.col("battle_time").str.slice(0, 10).alias("day"),
+            "level",
+            "starting_trophies",
             ctx=context(),
             t=tokens(vocab),
         )
 
     _, decks = snapshot.read(db_path, days=days, transform=shape, sync=False)
     a = decks.filter(pl.col("side") == 0)
-    b = decks.filter(pl.col("side") == 1).select("battle_id", pl.col("t").alias("b"))
+    b = decks.filter(pl.col("side") == 1).select(
+        "battle_id",
+        pl.col("t").alias("b"),
+        pl.col("level").alias("lb"),
+        pl.col("starting_trophies").alias("tb"),
+    )
     battles = (
         a.join(b, on="battle_id")
         .filter(pl.col("score") != 0.5)
-        .select("day", "ctx", pl.col("t").alias("a"), "b", y=pl.col("score").cast(pl.Float32))
+        .select(
+            "day",
+            "ctx",
+            pl.col("t").alias("a"),
+            "b",
+            pl.col("level").alias("la"),
+            "lb",
+            pl.col("starting_trophies").alias("ta"),
+            "tb",
+            y=pl.col("score").cast(pl.Float32),
+        )
         .sort("day")
     )
     out.parent.mkdir(parents=True, exist_ok=True)

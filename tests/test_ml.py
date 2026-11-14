@@ -26,6 +26,8 @@ def test_export_writes_one_row_per_battle_with_8_tokens(db_path: Path, tmp_path:
     assert set(df["a"].explode().to_list()) <= known  # every card is in the vocabulary
     assert PAD not in df["a"].explode().to_list()
     assert df["ctx"].unique().to_list() == [2 * 16 + 10]  # ranked, 9,000-9,999 trophies
+    assert df["la"].unique().to_list() == df["lb"].unique().to_list() == [15.0]
+    assert df["ta"].unique().to_list() == [9000]
 
 
 @pytest.fixture
@@ -59,3 +61,13 @@ def test_models_train_and_learn_the_better_deck(four_days: Path, tmp_path: Path,
     # The player's deck wins two in three: the model learns it from the decks alone.
     assert scores["test"].log_loss < 0.66
     assert (tmp_path / "ml" / f"{kind}.pt").exists()
+
+
+def test_the_strength_only_reference_trains(four_days: Path, tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    from crai.ml.train import train  # noqa: PLC0415 - torch is optional
+
+    data = tmp_path / "ml" / "battles.parquet"
+    export(four_days, data, days=0)
+    scores = train(data, tmp_path / "ml" / "strength.pt", "strength", epochs=2, batch=64)
+    assert 0 <= scores["test"].log_loss < 1  # equal levels and trophies: nothing to go on

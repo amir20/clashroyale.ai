@@ -40,18 +40,22 @@ CHUNK_BATTLES = 200_000  # battle ids read per part, so a full rebuild never hol
 _PART = re.compile(r"decks-(\d{9})-(\d{9})\.parquet")
 
 # Bump when the columns change: parts in an older format are rebuilt on the next sync.
-FORMAT = 2
+FORMAT = 3
 _FORMAT_FILE = ".format"
 
 # One row per player per 1v1 battle with a full 8-card deck. `specials` lists the cards played as
-# an Evolution or Hero, each as card_id * 10 + evolution_level, sorted and joined by '-'.
+# an Evolution or Hero, each as card_id * 10 + evolution_level, sorted and joined by '-'. `level` is
+# the deck's average card level on the in-game scale (the first ? is the top level, e.g. 16).
 _QUERY = """
 SELECT bp.battle_id, bp.player_tag, bp.side, bp.result, bp.deck_key, bp.starting_trophies,
        b.battle_type, b.deck_selection, b.battle_time,
        (SELECT group_concat(v, '-') FROM (
           SELECT pc.card_id * 10 + pc.evolution_level AS v FROM participant_cards pc
           WHERE pc.battle_id = bp.battle_id AND pc.player_tag = bp.player_tag
-            AND pc.kind = 'deck' AND pc.evolution_level > 0 ORDER BY v)) AS specials
+            AND pc.kind = 'deck' AND pc.evolution_level > 0 ORDER BY v)) AS specials,
+       (SELECT avg(pc.level + ? - pc.max_level) FROM participant_cards pc
+        WHERE pc.battle_id = bp.battle_id AND pc.player_tag = bp.player_tag
+          AND pc.kind = 'deck') AS level
 FROM battles b JOIN battle_participants bp ON bp.battle_id = b.id
 WHERE b.rowid BETWEEN ? AND ? AND b.team_size = 1
   AND bp.deck_key IS NOT NULL AND bp.result IS NOT NULL
@@ -70,6 +74,7 @@ def _schema() -> dict[str, pl.DataType]:
         "deck_selection": pl.String(),
         "battle_time": pl.String(),
         "specials": pl.String(),
+        "level": pl.Float32(),
     }
 
 
@@ -117,7 +122,8 @@ def backlog(db_path: Path) -> int:
 
 
 def _read_range(conn: sqlite3.Connection, lo: int, hi: int) -> pl.DataFrame:
-    cur = conn.execute(_QUERY, (lo, hi))
+    top = conn.execute("SELECT max(max_level) FROM cards WHERE is_support = 0").fetchone()[0]
+    cur = conn.execute(_QUERY, (top or 16, lo, hi))
     rows = cur.fetchall()
     schema = _schema()
     if not rows:
@@ -242,8 +248,13 @@ def read(
             ).lazy()
             return covered_rowid(db_path), (transform(scan) if transform else scan).collect()
         scan = pl.scan_parquet([p for *_, p in parts])
-        if _format(snapshot_dir(db_path)) < FORMAT:  # not rebuilt yet: nothing is known as special
-            scan = scan.with_columns(specials=pl.lit(None, pl.String()))
+        if _format(snapshot_dir(db_path)) < FORMAT:  # not rebuilt yet: newer columns are unknown
+            have = scan.collect_schema().names()
+            scan = scan.with_columns(
+                pl.lit(None, dt).alias(name)
+                for name, dt in _schema().items()
+                if name not in have and name != "result"  # result became score
+            )
         if after:
             scan = scan.filter(pl.col("battle_id") > after)
         if days:  # keep long-running servers from loading every battle ever crawled

@@ -16,8 +16,8 @@ import polars as pl
 import torch
 from torch import Tensor, nn
 
-from crai.ml.data import FORMS
-from crai.ml.model import Baseline, DeckNet
+from crai.ml.data import FORMS, strength
+from crai.ml.model import Baseline, DeckNet, Strength
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ class Split:
     a: Tensor
     b: Tensor
     ctx: Tensor
+    x: Tensor  # (n, 2): A's average card level minus B's, trophy gap in thousands (0 if unknown)
     y: Tensor
 
     def __len__(self) -> int:
@@ -51,7 +52,7 @@ def load(path: Path) -> tuple[dict[str, Split], int]:
     vocab_size = max(vocab.values()) + FORMS
     per_day = df.group_by("day").len().sort("day")
     # A day still being crawled has a fraction of the battles: test on full days only.
-    full = per_day.filter(pl.col("len") >= per_day["len"].max() / 4)["day"].to_list()
+    full = per_day.filter(pl.col("len") >= pl.col("len").max() / 4)["day"].to_list()
     test_day, val_day = full[-1], full[-2]
     df = df.filter(pl.col("day") <= test_day)
 
@@ -63,6 +64,7 @@ def load(path: Path) -> tuple[dict[str, Split], int]:
             side("a"),
             side("b"),
             torch.from_numpy(part["ctx"].to_numpy().astype(np.int16)),
+            torch.from_numpy(part.select(strength()).to_numpy().astype(np.float32)),
             torch.from_numpy(part["y"].to_numpy().astype(np.float32)),
         )
 
@@ -81,7 +83,12 @@ def predict(model: nn.Module, s: Split, dev: torch.device, batch: int = 65536) -
     out = []
     for i in range(0, len(s), batch):
         sl = slice(i, i + batch)
-        logit = model(s.a[sl].to(dev).long(), s.b[sl].to(dev).long(), s.ctx[sl].to(dev).long())
+        logit = model(
+            s.a[sl].to(dev).long(),
+            s.b[sl].to(dev).long(),
+            s.ctx[sl].to(dev).long(),
+            s.x[sl].to(dev),
+        )
         out.append(torch.sigmoid(logit).float().cpu())
     return torch.cat(out)
 
@@ -116,7 +123,11 @@ def train(
 ) -> dict[str, Scores]:
     dev = device()
     splits, vocab_size = load(data)
-    model: nn.Module = DeckNet(vocab_size, dim=dim) if kind == "decknet" else Baseline(vocab_size)
+    model: nn.Module = {
+        "decknet": lambda: DeckNet(vocab_size, dim=dim),
+        "baseline": lambda: Baseline(vocab_size),
+        "strength": Strength,
+    }[kind]()
     model.to(dev)
     params = sum(p.numel() for p in model.parameters())
     log.info("%s: %s parameters on %s", kind, f"{params:,}", dev)
@@ -134,11 +145,10 @@ def train(
         for i in range(0, len(tr), batch):
             idx = perm[i : i + batch]
             a, b = tr.a[idx].to(dev).long(), tr.b[idx].to(dev).long()
+            x, y = tr.x[idx], tr.y[idx]
             if torch.rand(()) < 0.5:  # either side first: the model must not care
-                a, b, y = b, a, 1 - tr.y[idx]
-            else:
-                y = tr.y[idx]
-            loss = loss_fn(model(a, b, tr.ctx[idx].to(dev).long()), y.to(dev))
+                a, b, x, y = b, a, -x, 1 - y
+            loss = loss_fn(model(a, b, tr.ctx[idx].to(dev).long(), x.to(dev)), y.to(dev))
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
