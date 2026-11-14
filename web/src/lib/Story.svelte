@@ -328,6 +328,27 @@
                   </p>
                 {/if}
               </div>
+              {#if report.model?.replay?.expected_pick != null}
+                {@const r = report.model.replay}
+                {@const more = (r.expected_pick ?? 0) - r.expected}
+                <div class="text-sm" data-testid="replay">
+                  <h3 class="font-semibold">Against {your} last {r.games} opponents</h3>
+                  <p class="text-base-content/75 mt-0.5">Same opponents, same card levels. The model expected <b>{r.expected.toFixed(1)}</b> wins with {your} deck and <b class="text-success">{(r.expected_pick ?? 0).toFixed(1)}</b> with this swap: about <b>{more >= 0 ? "+" : ""}{more.toFixed(1)}</b>. {them ? "They" : "You"} actually won {r.wins}.</p>
+                  <ul class="grid gap-1.5 mt-2">
+                    {#each r.battles.slice(0, 4) as b (b.battle_id)}
+                      <li class="grid grid-cols-[3rem_1fr_auto] items-center gap-2">
+                        <span class="text-center rounded-md text-[11px] font-bold py-0.5 {b.result === 'win' ? 'bg-success/20 text-success' : b.result === 'loss' ? 'bg-error/20 text-error' : 'bg-base-content/10'}">{b.result === "win" ? "Won" : b.result === "loss" ? "Lost" : "Draw"}</span>
+                        <div class="min-w-0">
+                          <div class="text-xs truncate">vs {b.opponent ?? "someone"}</div>
+                          <div class="grid grid-cols-8 gap-0.5 mt-0.5 max-w-44">{#each b.deck as c, i (i)}<CardTile card={c} />{/each}</div>
+                        </div>
+                        <span class="stat-num text-sm text-right"><span class="text-base-content/60">{Math.round(b.now * 100)}%</span> → <span class={(b.pick ?? 0) >= b.now ? "text-success" : "text-error"}>{Math.round((b.pick ?? 0) * 100)}%</span></span>
+                      </li>
+                    {/each}
+                  </ul>
+                  <p class="text-[11px] text-base-content/50 mt-1.5">The battles this swap changes most. Win chances, not results: nobody can say how a battle would have gone.</p>
+                </div>
+              {/if}
               {#if pick.singles.length > 1}
                 <div class="text-sm">
                   <h3 class="font-semibold mb-1.5">Or just one card</h3>

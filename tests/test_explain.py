@@ -138,3 +138,30 @@ def test_the_model_only_suggests_cards_players_with_the_core_run(
     )
     assert view is not None
     assert view["pick"] is None
+
+
+def test_replaying_the_last_opponents_with_the_suggested_deck(
+    analyzer: Analyzer, model_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The player's own 5 games (all won), played again with Cannon -> P.E.K.K.A: the same
+    opponents, and the model expects more wins."""
+    monkeypatch.setattr(explain, "MIN_REPLAY_GAMES", 3)
+    items = insights.games(analyzer, ME)
+    view = explain.report(
+        analyzer, model_path, ME, items, insights.replace_card(analyzer, ME, items)
+    )
+    assert view is not None
+    r = view["replay"]
+    assert r["games"] == 5 and r["wins"] == 5
+    assert 0 < r["expected"] < 5
+    assert r["expected_pick"] > r["expected"]
+    assert all(len(b["deck"]) == 8 and b["pick"] > b["now"] for b in r["battles"])
+
+
+def test_a_battle_is_the_same_whichever_side_is_asked(model_path: Path) -> None:
+    model = explain.load(model_path)
+    assert model is not None
+    a = [model.token(c * 10) for c in CYCLE]
+    b = [model.token(c * 10) for c in (*CORE, MUSKETEER, KNIGHT, PEKKA)]
+    p = explain.chance(model, a, b, (0.5, 0.2))
+    assert p == pytest.approx(1 - explain.chance(model, b, a, (-0.5, -0.2)))

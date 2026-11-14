@@ -44,6 +44,7 @@ class Model:
     vs: dict[tuple[int, int], float]
     about: dict[str, Any]
     games: list[int] = field(default_factory=list)  # training battles per token
+    strength: tuple[float, float] = (0.0, 0.0)  # per level of card-level gap, per 1,000 trophies
 
     def token(self, v: int) -> int:
         """The token of a card as played (card id * 10 + Evolution/Hero level)."""
@@ -90,6 +91,7 @@ def load(path: Path) -> Model | None:
         vs={(int(x), int(y)): w for x, y, w in raw["vs"]},
         about=raw["about"],
         games=raw.get("games", []),
+        strength=(raw["strength"][0], raw["strength"][1]),
     )
     _cache[path] = (mtime, model)
     return model
@@ -429,6 +431,98 @@ def _check(a: Analyzer, tag: str, items: list[insights.Game], pick: dict[str, An
     }
 
 
+REPLAY_GAMES = 30
+MIN_REPLAY_GAMES = 10
+SCORE = {"win": 1.0, "draw": 0.5, "loss": 0.0}
+
+
+def chance(model: Model, a: list[int], b: list[int], gaps: tuple[float, float]) -> float:
+    """P(deck a beats deck b) with a's card-level gap and trophy gap (thousands) over b."""
+    logit = model.own(a) - model.own(b) + sum(model.counter(x, y) for x in a for y in b)
+    logit += model.strength[0] * gaps[0] + model.strength[1] * gaps[1]
+    return 1 / (1 + math.exp(-logit))
+
+
+def _played(a: Analyzer, ids: list[int]) -> dict[tuple[int, str], tuple[list[int], float | None]]:
+    """Each side's deck in these battles, as played (card id * 10 + form), and its average card
+    level against the max (only the gap between the two sides matters)."""
+    marks = ",".join("?" * len(ids))
+    rows = a.query(
+        f"""SELECT battle_id, player_tag, card_id, coalesce(evolution_level, 0) AS form,
+                   level - max_level AS below
+            FROM participant_cards WHERE battle_id IN ({marks}) AND kind = 'deck'""",
+        tuple(ids),
+    ).to_dicts()
+    decks: dict[tuple[int, str], list[int]] = {}
+    levels: dict[tuple[int, str], list[float]] = {}
+    for r in rows:
+        k = (r["battle_id"], r["player_tag"])
+        decks.setdefault(k, []).append(r["card_id"] * 10 + r["form"])
+        if r["below"] is not None:
+            levels.setdefault(k, []).append(r["below"])
+    return {
+        k: (d, sum(levels[k]) / len(levels[k]) if levels.get(k) else None) for k, d in decks.items()
+    }
+
+
+def replay(
+    a: Analyzer,
+    model: Model,
+    tag: str,
+    items: list[insights.Game],
+    mine: list[int],
+    alt: list[int] | None,
+    cards: dict[int, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """The player's last opponents, played again on paper: each battle's win chance with their
+    deck and, if there's a suggestion, with the suggested one, against the same opponent with
+    the same level and trophy gaps. Matchmaking goes by trophies, not decks, so they'd have met
+    the same opponents. Only battles with their current deck, so the odds compare with what
+    actually happened."""
+    key = insights.current_deck_key(items)
+    games = [g for g in items if g["deck_key"] == key][:REPLAY_GAMES]
+    if len(games) < MIN_REPLAY_GAMES:
+        return None
+    decks = _played(a, [g["battle_id"] for g in games])
+    now_t = [model.token(v) for v in mine]
+    alt_t = [model.token(v) for v in alt] if alt else None
+    rows: list[dict[str, Any]] = []
+    for g in games:
+        opp = decks.get((g["battle_id"], g["opponent_tag"]))
+        me = decks.get((g["battle_id"], tag))
+        if not opp or len(opp[0]) != 8:
+            continue
+        level_gap = me[1] - opp[1] if me and me[1] is not None and opp[1] is not None else 0.0
+        mine_tr, theirs_tr = g["starting_trophies"], g["opponent_trophies"]
+        trophy_gap = (mine_tr - theirs_tr) / 1000 if mine_tr and theirs_tr else 0.0
+        theirs = [model.token(v) for v in opp[0]]
+        p_now = chance(model, now_t, theirs, (level_gap, trophy_gap))
+        p_alt = chance(model, alt_t, theirs, (level_gap, trophy_gap)) if alt_t else None
+        rows.append(
+            {
+                "battle_id": g["battle_id"],
+                "time": g["battle_time"],
+                "result": g["result"],
+                "opponent": g["opponent"],
+                "deck": [insights._as_card(cards, v) for v in opp[0] if v // 10 in cards],
+                "level_gap": round(level_gap, 2),
+                "now": round(p_now, 3),
+                "pick": round(p_alt, 3) if p_alt is not None else None,
+            }
+        )
+    if len(rows) < MIN_REPLAY_GAMES:
+        return None
+    expected = sum(r["now"] for r in rows)
+    return {
+        "games": len(rows),
+        "wins": sum(SCORE.get(r["result"], 0.0) for r in rows),
+        "expected": round(expected, 1),
+        "expected_pick": round(sum(r["pick"] for r in rows), 1) if alt_t else None,
+        # The battles the suggestion changes most, either way.
+        "battles": sorted(rows, key=lambda r: -abs((r["pick"] or r["now"]) - r["now"])),
+    }
+
+
 def _core_cards(a: Analyzer, tag: str, items: list[insights.Game]) -> set[int] | None:
     """Cards (as played) that decks with the player's core run often enough. None when the core
     isn't known: then any card the model has seen enough can be suggested."""
@@ -474,12 +568,15 @@ def report(
     pick = recommend(
         model, f, mine, flex, cards, insights.unlocked(a, tag), _core_cards(a, tag, items)
     )
+    alt = None
     if pick:
         pick["check"] = _check(a, tag, items, pick)
+        alt = [v for v in mine if v not in pick["dropped"]] + pick["added"]
         del pick["dropped"], pick["added"]
+    replayed = replay(a, model, tag, items, mine, alt, cards)
     view = deck_view(model, f, mine, cards)
     view["field"]["scope"] = insights.trophy_scope(items) if f.near else "all players"
-    return view | {"pick": pick, "about": about(model)}
+    return view | {"pick": pick, "replay": replayed, "about": about(model)}
 
 
 LEVEL = {None: 0, "evolution": 1, "hero": 2, "both": 3}

@@ -269,6 +269,30 @@ flowchart TB
   suggestions. "Unknown" means too few players have made that exact swap to say.
 - **Alternatives.** The best single-card swap for each flex card is listed too.
 
+## 6. Replaying the last opponents
+
+The trophy-range field is "the decks you'd typically face". The replay ([`explain.replay`](explain.py))
+uses the decks you *did* face:
+
+```mermaid
+flowchart LR
+    G["your last 30 battles<br/>with this deck"] --> O["each opponent's deck as played,<br/>their card levels and trophies"]
+    O --> N["P(win) with your deck<br/>same level + trophy gap"]
+    O --> P["P(win) with the suggested deck<br/>same opponent, same gaps"]
+    N --> E1["expected wins now"]
+    P --> E2["expected wins with the swap"]
+    E1 --> R["actual wins vs expected:<br/>beating the odds?"]
+```
+
+- **Same opponents.** Matchmaking goes by trophies, not decks, so with the new deck you'd likely
+  have met the same opponents.
+- **Real gaps.** Each battle uses its own card-level and trophy gap; the new cards are assumed
+  to be at your deck's level.
+- **Expected wins, not results.** The page shows the sum of win chances, and the battles the swap
+  changes most, never "you would have won".
+- **Beating the odds.** Actual wins minus expected wins, with your own deck: more than expected
+  means you play it better than most players would.
+
 ## Retraining
 
 ```sh

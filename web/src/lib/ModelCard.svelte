@@ -78,5 +78,13 @@
     </div>
   {/if}
 
+  {#if model.replay}
+    {@const r = model.replay}
+    {@const edge = r.wins - r.expected}
+    <p class="text-sm text-base-content/75" data-testid="beat-odds">
+      <span class="font-semibold text-base-content/90">Against {your} last {r.games} opponents</span> with this deck, the model expected {r.expected.toFixed(1)} wins, counting card levels. {them ? "They" : "You"} won {r.wins}{#if Math.abs(edge) >= 1.5}: <b class={edge > 0 ? "text-success" : "text-error"}>{edge > 0 ? `${edge.toFixed(1)} more than expected` : `${(-edge).toFixed(1)} fewer than expected`}</b>{edge > 0 ? (them ? ", so they play it better than most." : ", so you play it better than most.") : (them ? ", so the deck isn't the whole story." : ", so the deck isn't the whole story: play matters too.")}{:else}, about what the model expected.{/if}
+    </p>
+  {/if}
+
   <button class="text-sm link link-primary text-left cursor-pointer w-fit" onclick={onHow} data-testid="model-how">How does Rook predict this?</button>
 </div>

@@ -30,6 +30,14 @@ export type ModelView = {
   synergy: { cards: Played[]; effect: number }[];
   clash: { cards: Played[]; effect: number }[];
   field: { decks: number; near: boolean; scope: string };
+  /** The player's last opponents, played again on paper with their deck and the suggested one. */
+  replay: {
+    games: number;
+    wins: number;
+    expected: number;
+    expected_pick: number | null;
+    battles: { battle_id: number; time: string; result: "win" | "loss" | "draw"; opponent: string | null; deck: Played[]; level_gap: number; now: number; pick: number | null }[];
+  } | null;
   /** The model's own suggestion: flex swaps that raise the predicted win chance most. */
   pick: {
     win: number;
