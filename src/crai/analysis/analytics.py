@@ -249,6 +249,13 @@ def specials() -> pl.Expr:
     )
 
 
+def variants() -> pl.Expr:
+    """The deck's 8 cards as played: card_id * 10 + status (0 plain, 1 Evolution, 2 Hero)."""
+    sp = specials()
+    plain = pl.col("cards").list.eval(pl.element() * 10)
+    return plain.list.set_difference(sp.list.eval(pl.element() // 10 * 10)).list.concat(sp)
+
+
 def special_count() -> pl.Expr:
     """How many of the deck's slots hold an Evolution or Hero."""
     return specials().list.len()

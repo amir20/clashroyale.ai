@@ -6,7 +6,8 @@ answers need no AI call and can't be hallucinated. `coach.py` turns these result
 
 from collections import Counter, defaultdict
 from collections.abc import Callable, Hashable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from itertools import combinations
 from math import ceil
 from statistics import median
 from typing import Any
@@ -23,6 +24,7 @@ from crai.analysis.analytics import (
     shared_cards,
     special_count,
     specials,
+    variants,
 )
 from crai.collect.client import normalize_tag
 
@@ -44,7 +46,6 @@ AGAINST_SCOPE = "Games where the OPPONENT's deck had this card. The player was n
 WITH_SCOPE = "Games where the player's OWN deck had this card."
 SCORE = {"win": 1.0, "draw": 0.5, "loss": 0.0}
 MEANINGFUL_GAIN = 0.02  # with huge samples, tiny differences clear the margin but don't matter
-MIN_CANDIDATE_PLAYERS = 100  # fewer, and one strong player can make a card look good
 MIN_MATCHUP_GAMES = 15  # we scan ~60 opponent cards, so a few games will look extreme by chance
 
 
@@ -565,7 +566,6 @@ def _family(a: Analyzer, tag: str, mine: list[int], items: list[Game], n_special
 
 
 MIN_SWAP_GAMES = 100  # decks running each card, before a head-to-head says anything
-SHORTLIST = 8  # candidates checked head-to-head
 MIN_COMPANION_SHARE = 0.25  # "most of these decks also changed X" needs this share of them
 MIN_WEAK_SPOT_GAMES = 30  # games against an opponent card, per side, to call out a weak spot
 
@@ -664,32 +664,14 @@ class SwapField:
             break
         assert chosen is not None
         p, (o, i), near, needed = chosen
-        out_rate = o["score"].mean() if o.height else None
-        in_rate = i["score"].mean() if i.height else None
-        verdict, gap, margin = "unknown", None, None
-        if min(o.height, i.height) >= MIN_SWAP_GAMES:
-            diff = float(in_rate) - float(out_rate)  # ty: ignore[invalid-argument-type]
-            gap = round(diff, 3)
-            margin = round(1.96 * (0.25 / o.height + 0.25 / i.height) ** 0.5, 3)
-            verdict = "even"
-            if abs(diff) > max(margin, MEANINGFUL_GAIN):
-                verdict = "better" if diff > 0 else "worse"
-        return HeadToHead(
-            out_games=o.height,
-            in_games=i.height,
-            out_players=o["player_tag"].n_unique() if o.height else 0,
-            in_players=i["player_tag"].n_unique() if i.height else 0,
-            out_rate=out_rate,  # ty: ignore[invalid-argument-type]
-            in_rate=in_rate,  # ty: ignore[invalid-argument-type]
-            gap=gap,
-            margin=margin,
-            verdict=verdict,
+        return _head_to_head(
+            o,
+            i,
             decks=p.height,
             near=near,
             needed=needed,
             exact=needed == top,
             also=self._also(i, in_id) if needed < top else None,
-            sides=(o, i),
         )
 
     def _also(
@@ -713,6 +695,46 @@ class SwapField:
         if not top["dropped"] or share < MIN_COMPANION_SHARE:
             return None
         return (tuple(top["dropped"]), tuple(top["added"]), round(share, 2))
+
+
+def _head_to_head(
+    o: pl.DataFrame,
+    i: pl.DataFrame,
+    *,
+    decks: int,
+    near: bool,
+    needed: int,
+    exact: bool,
+    also: tuple[tuple[int, ...], tuple[int, ...], float] | None = None,
+) -> HeadToHead:
+    """Decks keeping the player's card(s) (`o`) against decks with the new one(s) (`i`)."""
+    out_rate = o["score"].mean() if o.height else None
+    in_rate = i["score"].mean() if i.height else None
+    verdict, gap, margin = "unknown", None, None
+    if min(o.height, i.height) >= MIN_SWAP_GAMES:
+        diff = float(in_rate) - float(out_rate)  # ty: ignore[invalid-argument-type]
+        gap = round(diff, 3)
+        margin = round(1.96 * (0.25 / o.height + 0.25 / i.height) ** 0.5, 3)
+        verdict = "even"
+        if abs(diff) > max(margin, MEANINGFUL_GAIN):
+            verdict = "better" if diff > 0 else "worse"
+    return HeadToHead(
+        out_games=o.height,
+        in_games=i.height,
+        out_players=o["player_tag"].n_unique() if o.height else 0,
+        in_players=i["player_tag"].n_unique() if i.height else 0,
+        out_rate=out_rate,  # ty: ignore[invalid-argument-type]
+        in_rate=in_rate,  # ty: ignore[invalid-argument-type]
+        gap=gap,
+        margin=margin,
+        verdict=verdict,
+        decks=decks,
+        near=near,
+        needed=needed,
+        exact=exact,
+        also=also,
+        sides=(o, i),
+    )
 
 
 def weak_spots(a: Analyzer, h2h: HeadToHead, limit: int = 3) -> list[dict[str, Any]]:
@@ -776,6 +798,239 @@ def match(h2h: HeadToHead, cards: dict[int, dict[str, Any]]) -> dict[str, Any]:
             "share": share,
         }
     return {"exact": h2h.exact, "shared": h2h.needed, "near": h2h.near, "also": also}
+
+
+# An archetype: the cards of the player's deck that many players run together (the core, staples
+# nobody changes), and the rest (flex), where decks built on that core vary.
+MIN_CORE_CARDS = 3
+MIN_CORE_GAMES = 1000
+MIN_CORE_PLAYERS = 100  # fewer, and the "core" is one person's exact deck
+MIN_PACKAGE_PLAYERS = 30
+PACKAGES_CHECKED = 15
+
+
+@dataclass(frozen=True)
+class Archetype:
+    core: tuple[int, ...]  # card_id * 10 + status, like `variants()`
+    flex: tuple[int, ...]
+    decks: pl.DataFrame  # other players' decks with the core
+    near: bool  # within the player's trophy range
+
+
+def _as_card(cards: dict[int, dict[str, Any]], v: int) -> dict[str, Any]:
+    return _played_as(cards[v // 10], v % 10)
+
+
+def archetype(a: Analyzer, tag: str, items: list[Game]) -> Archetype | None:
+    """Find the player's core: the largest set of their cards (as played) that enough players
+    run together. Every subset of their 8 cards is counted in one pass, as a bitmask of which of
+    their cards each deck has."""
+    tag = normalize_tag(tag)
+    mine = sorted(c * 10 + s for c, s in slots(a, tag, items).items())
+    if len(mine) != 8:
+        return None
+    ids = [v // 10 for v in mine]
+    mask = sum(pl.col("v").list.contains(v).cast(pl.Int64) * (1 << i) for i, v in enumerate(mine))
+
+    def find(field: pl.DataFrame, *, near: bool) -> Archetype | None:
+        d = (
+            field.filter(shared_cards(ids) >= MIN_CORE_CARDS)
+            .filter(pl.col("player_tag") != tag)  # after: a string compare on every deck is slow
+            .with_columns(v=variants())
+            .with_columns(mask=mask)
+        )
+        counts = d.group_by("mask").len().rows()
+        who = d.select("mask", "player_tag").unique()  # small: counts players cheaply
+        for size in range(7, MIN_CORE_CARDS - 1, -1):
+            options = []
+            for subset in combinations(range(8), size):
+                bits = sum(1 << i for i in subset)
+                games = sum(n for m, n in counts if m & bits == bits)
+                if games >= MIN_CORE_GAMES:
+                    options.append((games, bits))
+            for _, bits in sorted(options, reverse=True):
+                players = who.filter((pl.col("mask") & bits) == bits)["player_tag"].n_unique()
+                if players < MIN_CORE_PLAYERS:
+                    continue
+                core = tuple(v for i, v in enumerate(mine) if bits >> i & 1)
+                flex = tuple(v for v in mine if v not in core)
+                # Cards are matched as played, so a package that trades a Hero for a plain card
+                # carries the cost of losing the Hero.
+                fam = d.filter((pl.col("mask") & bits) == bits)
+                return Archetype(core, flex, fam.drop("mask"), near)
+        return None
+
+    def pick() -> Archetype | None:
+        # What a deck is doesn't depend on trophies, so the core comes from everyone's decks:
+        # near the player's trophies alone, the sample is too small to see all the staples.
+        return find(a.decks(), near=False)
+
+    return _near_stat(a, ("archetype", tag, tuple(mine)), items, pick)
+
+
+def _scopes(arch: Archetype, items: list[Game]) -> Iterator[Archetype]:
+    """The archetype's decks near the player's trophies first (when there are enough), then at
+    every trophy level."""
+    near = near_player(arch.decks, items)
+    if near is not None and near.height >= MIN_CORE_GAMES:
+        yield replace(arch, decks=near, near=True)
+    yield arch
+
+
+def _package(
+    arch: Archetype, dropped: list[int], added: list[int], *, fallback: bool = False
+) -> tuple[HeadToHead, str]:
+    """Decks built on the core that keep `dropped` against those that run `added` instead, and
+    which baseline that was: "yours". With `fallback`, when too few decks keep the player's
+    cards (players with this core mostly change every flex card), the baseline is every other
+    deck with the core: "core"."""
+    v = pl.col("v").list.contains
+
+    def having(yes: list[int], no: list[int]) -> pl.DataFrame:
+        return arch.decks.filter(
+            pl.all_horizontal([v(x) for x in yes]), ~pl.any_horizontal([v(x) for x in no])
+        )
+
+    keep, baseline = having(dropped, added), "yours"
+    if fallback and keep.height < MIN_SWAP_GAMES:
+        keep, baseline = arch.decks.filter(~pl.all_horizontal([v(x) for x in added])), "core"
+    h2h = _head_to_head(
+        keep,
+        having(added, dropped),
+        decks=arch.decks.height,
+        near=arch.near,
+        needed=len(arch.core),
+        exact=False,
+    )
+    return h2h, baseline
+
+
+def core_match(
+    arch: Archetype, h2h: HeadToHead, cards: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "core": [_as_card(cards, v) for v in arch.core if v // 10 in cards],
+        "exact": False,
+        "shared": len(arch.core),
+        "near": h2h.near,
+        "also": None,
+    }
+
+
+def flex_packages(
+    a: Analyzer, tag: str, arch: Archetype, items: list[Game], cards: dict[int, dict[str, Any]]
+) -> list[tuple[dict[str, Any], HeadToHead]]:
+    """Packages near the player's trophies when any clearly win there, else at every level."""
+    for scope in _scopes(arch, items):
+        found = _flex_packages(a, tag, scope, cards)
+        if found:
+            return found
+    return []
+
+
+def package(arch: Archetype, items: list[Game], dropped: list[int], added: list[int]) -> HeadToHead:
+    """One package head-to-head, near the player's trophies when both sides have enough games."""
+    h2h = None
+    for scope in _scopes(arch, items):
+        h2h, _ = _package(scope, dropped, added)
+        if h2h.verdict != "unknown":
+            break
+    assert h2h is not None
+    return h2h
+
+
+def _flex_packages(
+    a: Analyzer, tag: str, arch: Archetype, cards: dict[int, dict[str, Any]]
+) -> list[tuple[dict[str, Any], HeadToHead]]:
+    """How other players fill the flex slots around the player's core (often all of them),
+    each against the player's own flex cards, or every other deck with the core when too few
+    keep theirs. Only the ones that clearly win, best first."""
+    if not arch.decks.height:
+        return []
+    flex, mine = list(arch.flex), sorted({*arch.core, *arch.flex})
+    changes = (
+        arch.decks.select(
+            "player_tag",
+            dropped=pl.lit(flex).list.set_difference(pl.col("v")).list.sort(),
+            added=pl.col("v").list.set_difference(pl.lit(mine)).list.sort(),
+        )
+        .filter(pl.col("dropped").list.len() >= 1)
+        .group_by("dropped", "added")
+        .agg(n=pl.len(), players=pl.col("player_tag").n_unique())
+        .filter(pl.col("n") >= MIN_SWAP_GAMES, pl.col("players") >= MIN_PACKAGE_PLAYERS)
+        .sort("n", descending=True)
+        .head(PACKAGES_CHECKED)
+        .rows(named=True)
+    )
+    owned = unlocked(a, tag)
+
+    def has(v: int) -> bool:  # unknown collection: assume they have it
+        cid, status = v // 10, v % 10
+        return cid in cards and (owned is None or (cid in owned and owned[cid] & status == status))
+
+    out = []
+    for c in changes:
+        if not all(has(v) for v in c["added"]):
+            continue
+        h2h, baseline = _package(arch, c["dropped"], c["added"], fallback=True)
+        if h2h.verdict != "better" or h2h.gap is None or h2h.margin is None:
+            continue
+        row = {
+            "baseline": baseline,  # "yours": vs decks keeping their cards; "core": vs the rest
+            "out": [_as_card(cards, v) for v in c["dropped"]],
+            "in": [_as_card(cards, v) for v in c["added"]],
+            "gain": h2h.gap,
+            "margin": h2h.margin,
+            "games": h2h.in_games,
+            "players": h2h.in_players,
+            "out_games": h2h.out_games,
+            "real": True,
+            "match": core_match(arch, h2h, cards),
+        }
+        out.append((row, h2h))
+    out.sort(key=lambda x: x[1].gap - x[1].margin, reverse=True)  # ty: ignore[unsupported-operator]
+    return out
+
+
+def flex_fills(arch: Archetype, cards: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """How players with this core fill the flex slots: the most played fill, and how many games
+    use exactly the player's own."""
+    flex = list(arch.flex)
+    fills = (
+        (
+            arch.decks.select(
+                "player_tag",
+                "score",
+                dropped=pl.lit(flex).list.set_difference(pl.col("v")).list.len(),
+                fill=pl.col("v").list.set_difference(pl.lit(list(arch.core))).list.sort(),
+            )
+            .group_by("fill")
+            .agg(
+                games=pl.len(),
+                players=pl.col("player_tag").n_unique(),
+                rate=pl.col("score").mean(),
+                yours=(pl.col("dropped") == 0).any(),
+            )
+            .sort("games", descending=True)
+        )
+        if arch.decks.height
+        else None
+    )
+    if fills is None or not fills.height:
+        return {"popular": None, "your_fill_games": 0}
+    top = fills.row(0, named=True)
+    own = fills.filter("yours")
+    return {
+        "popular": None
+        if top["yours"]
+        else {
+            "cards": [_as_card(cards, v) for v in top["fill"] if v // 10 in cards],
+            "games": top["games"],
+            "players": top["players"],
+            "win_rate": round(top["rate"], 3),
+        },
+        "your_fill_games": own["games"].sum() if own.height else 0,
+    }
 
 
 def similar_battles(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
@@ -852,51 +1107,15 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         ),
         key=lambda r: r["gain"],
     )
-    weakest = yours[0] if yours else None
-    slot = played.get(weakest["id"], 0) if weakest else 0
-    owned = unlocked(a, tag) if slot else None
-
-    def fits(cid: int) -> bool:
-        return can_play(cards[cid], slot) and (owned is None or owned.get(cid, 0) & slot == slot)
-
-    # Cards that do well in decks like theirs. "With vs without" only says a card's decks win;
-    # whether it beats the card it would replace is the head-to-head below.
-    shortlist = sorted(
-        (
-            row(r)
-            for r in per
-            if r["card_id"] not in mine
-            and r["card_id"] in cards
-            and r["status"] == slot
-            and fits(r["card_id"])
-            and r["games"] >= 100
-            and r["players"] >= MIN_CANDIDATE_PLAYERS
-            and r["gain"] > max(r["margin"], MEANINGFUL_GAIN)
-        ),
-        key=lambda r: r["gain"] - r["margin"],
-        reverse=True,
-    )[:SHORTLIST]
-    checked: list[tuple[dict[str, Any], HeadToHead]] = []
-    if weakest and shortlist:
-        others = [c for c in mine if c != weakest["id"]]
-        field = SwapField(a, tag, items, others, sum(1 for s in played.values() if s))
-        for c in shortlist:
-            h2h = field.compare(weakest["id"], c["id"], slot)
-            if h2h.verdict != "better" or h2h.gap is None or h2h.margin is None:
-                continue
-            row_ = c | {
-                "gain": h2h.gap,  # the same number the swap chart shows
-                "margin": h2h.margin,
-                "games": h2h.in_games,
-                "players": h2h.in_players,
-                "real": True,
-                "match": match(h2h, cards),
-            }
-            checked.append((row_, h2h))
-        checked.sort(key=lambda x: x[0]["gain"] - x[0]["margin"], reverse=True)
-    candidates = [r for r, _ in checked]
-    if checked:  # where the best swap loses, for the one Rook suggests
-        candidates[0]["watch_out"] = weak_spots(a, checked[0][1])
+    arch = archetype(a, tag, items)
+    core_ids = {v // 10 for v in arch.core} if arch else set()
+    # Staples aren't up for swapping: the weakest card is the weakest flex card.
+    flexible = [r for r in yours if r["id"] not in core_ids]
+    weakest = flexible[0] if flexible else None
+    found = flex_packages(a, tag, arch, items, cards) if arch else []
+    candidates = [r for r, _ in found[:4]]
+    if found:  # where the best package loses, for the one Rook suggests
+        candidates[0]["watch_out"] = weak_spots(a, found[0][1])
     return {
         "enough": True,
         "family_decks": n,
@@ -904,10 +1123,13 @@ def replace_card(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any]:
         "min_shared_cards": family.min_shared,
         "family_players": fam["player_tag"].n_unique(),
         "yours": yours,
-        "candidates": candidates[:4],  # gain = head-to-head against `weakest`
-        "tested": len({r["card_id"] for r in per if r["card_id"] not in mine}),
+        "core": [_as_card(cards, v) for v in arch.core if v // 10 in cards] if arch else None,
+        "flex": [_as_card(cards, v) for v in arch.flex if v // 10 in cards] if arch else None,
+        "archetype_decks": arch.decks.height if arch else 0,
+        "archetype_players": arch.decks["player_tag"].n_unique() if arch else 0,
+        **(flex_fills(arch, cards) if arch else {"popular": None, "your_fill_games": 0}),
+        "candidates": candidates,  # flex packages, gain = head-to-head against the player's own
         "weakest": weakest,
-        "slot": STATUS.get(slot),  # the weakest card's slot, which every candidate fits
     }
 
 

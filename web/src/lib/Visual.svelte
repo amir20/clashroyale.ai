@@ -64,7 +64,7 @@
     {#if v.gap != null}
       <p class="text-center text-sm mt-1" data-testid="swap-gap">{v.in.name} decks win about <span class="stat-num">{Math.abs(v.gap * 100).toFixed(1)} {v.gap >= 0 ? "more" : "fewer"}</span> games per 100</p>
     {/if}
-    <p class="text-center text-xs text-base-content/60 mt-0.5" data-testid="swap-match">{v.match?.exact ? `${Your} exact deck with only this card changed` : `Decks sharing at least ${v.min_shared_cards} of ${your} other cards`}{v.near ? ", near " + your + " trophies" : ""}</p>
+    <p class="text-center text-xs text-base-content/60 mt-0.5" data-testid="swap-match">{v.match?.core ? `Decks built on ${your} core: ${v.match.core.map((c: any) => c.name).join(", ")}` : v.match?.exact ? `${Your} exact deck with only this card changed` : `Decks sharing at least ${v.min_shared_cards} of ${your} other cards`}{v.near ? ", near " + your + " trophies" : ""}</p>
     {#if v.match?.also}
       <p class="text-center text-xs mt-2" data-testid="swap-also">{Math.round(v.match.also.share * 100)}% of these decks also swapped {v.match.also.dropped.map((c: any) => c.name).join(" + ")} for {v.match.also.added.map((c: any) => c.name).join(" + ")}</p>
     {/if}

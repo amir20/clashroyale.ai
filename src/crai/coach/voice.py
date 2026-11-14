@@ -87,11 +87,39 @@ def _names(cards: list[dict[str, Any]]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
+def _played_names(cards: list[dict[str, Any]]) -> str:
+    return ", ".join(_as_played(c) for c in cards)
+
+
+def _pack(cards: list[dict[str, Any]]) -> str:
+    return " + ".join(_as_played(c) for c in cards)
+
+
+def _versus(c: dict[str, Any]) -> str:
+    if c.get("baseline") == "core":
+        return "than other decks with your core"
+    return f"than decks keeping {_pack(c['out'])}"
+
+
+def _popular(r: dict[str, Any]) -> str:
+    pop = r.get("popular")
+    if not pop:
+        return ""
+    rare = r.get("your_fill_games", 0) < 100
+    lead = "Your flex cards are a rare combo. " if rare else ""
+    return (
+        f"{lead}Most players with your core run {_pack(pop['cards'])} "
+        f"({pop['games']:,} games, {_pct(pop['win_rate'])} won)."
+    )
+
+
 def swap_caveats(c: dict[str, Any]) -> str:
     """How literal the swap is, and where it loses: the swap may not work on its own."""
     out = []
     m = c.get("match") or {}
-    if m.get("exact"):
+    if m.get("core"):
+        out.append(f"That's decks built on the same core as yours ({_played_names(m['core'])}).")
+    elif m.get("exact"):
         out.append("That's players running your exact deck with just that one change.")
     elif m.get("also"):
         also = m["also"]
@@ -127,13 +155,20 @@ def replace_card(r: dict[str, Any]) -> str:
             f"{_as_played(weak)} is your lowest: {stats}, and that gap's too small to matter. "
             "Your losses are coming from somewhere else, so ask me why you keep losing."
         )
+    if r.get("core"):
+        msg += (
+            f" Your core is {_played_names(r['core'])}: players keep those, so I only "
+            f"swap your flex cards ({_played_names(r['flex'])})."
+        )
+    if pop := _popular(r):
+        msg += " " + pop
     if r["candidates"]:
         c = r["candidates"][0]
         msg += (
-            f" If you're itching to swap, test {_as_played(c)}: decks with it win "
-            f"{_per_100(c['gain'])} than decks keeping {_as_played(weak)}, from "
-            f"{c['players']:,} different players. {swap_caveats(c)} "
-            "I checked a lot of cards, so it could still be a fluke."
+            f" If you're itching to swap, test {_pack(c['in'])} for {_pack(c['out'])}: "
+            f"decks built on your core win {_per_100(c['gain'])} with it {_versus(c)}, from "
+            f"{c['players']:,} different players. {swap_caveats(c | {'match': {}})} "
+            "I checked a lot of combos, so it could still be a fluke."
         ).replace("  ", " ")
     return msg
 
@@ -146,13 +181,16 @@ def try_line(r: dict[str, Any]) -> str:
     if r["candidates"]:
         c = r["candidates"][0]
         return (
-            f"Test {_as_played(c)} for {_as_played(weak)}. Decks like yours with it win "
-            f"{_per_100(c['gain'])}. {swap_caveats(c)} Could still be a fluke, so give it 20 games."
+            f"Keep your core, test {_pack(c['in'])} for {_pack(c['out'])}. Decks built on your "
+            f"core win {_per_100(c['gain'])} with it {_versus(c)}. "
+            f"{swap_caveats(c | {'match': {}})} "
+            "Could still be a fluke, so give it 20 games."
         ).replace("  ", " ")
     if weak["real"]:
         gain = _per_100(weak["gain"])
         return f"{_as_played(weak)} is costing you: decks like yours win {gain} with it."
-    return "None of your cards is hurting you. Your losses come from somewhere else."
+    pop = _popular(r)
+    return f"None of your cards is hurting you. {pop}".strip()
 
 
 def best_cards(r: dict[str, Any]) -> str:

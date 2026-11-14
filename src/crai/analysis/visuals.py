@@ -25,13 +25,16 @@ from crai.analysis.insights import (
     _ids,
     _played_as,
     _record,
+    archetype,
     can_play,
     compared,
+    core_match,
     current_deck_key,
     elixir_standing,
     match,
     near_filters,
     nemesis,
+    package,
     record_against,
     slots,
     trend,
@@ -89,9 +92,25 @@ def swap_view(
             f"{cards[out_id]['name']}'s {form} slot. Compare it with one of their plain cards."
         }
 
-    n_special = sum(1 for s in played.values() if s)
-    field = SwapField(a, tag, items, others, n_special)
-    h2h = field.compare(out_id, in_id, slot)
+    # Built on the player's core when there is one: the swap changes a flex card, and is judged
+    # on decks sharing the core, like the story's suggestion.
+    arch = archetype(a, tag, items)
+    out_v, in_v = out_id * 10 + slot, in_id * 10 + slot
+    if arch and out_v in arch.core:
+        core = ", ".join(_played_as(cards[v // 10], v % 10)["name"] for v in arch.core)
+        flex = ", ".join(_played_as(cards[v // 10], v % 10)["name"] for v in arch.flex)
+        return {
+            "error": f"{cards[out_id]['name']} is a staple: it's in the core ({core}) that "
+            f"{arch.decks.height:,} decks like theirs are built on, so it isn't swapped. "
+            f"Their flex cards are {flex}: compare one of those."
+        }
+    if arch and out_v in arch.flex:
+        h2h = package(arch, items, [out_v], [in_v])
+        how = core_match(arch, h2h, cards)
+    else:
+        n_special = sum(1 for s in played.values() if s)
+        h2h = SwapField(a, tag, items, others, n_special).compare(out_id, in_id, slot)
+        how = match(h2h, cards)
 
     def side(cid: int, games: int, players: int) -> dict[str, Any]:
         own = [g for g in items if cid in _ids(g["deck_key"])]
@@ -106,8 +125,10 @@ def swap_view(
     verdict, gap, near, needed = h2h.verdict, h2h.gap, h2h.near, h2h.needed
     slot_note = f", each card played as {STATUS[slot]}" if slot else ", both cards played plain"
     range_note = "within the player's trophy range" if near else "at all trophy levels"
-    how = match(h2h, cards)
-    if h2h.exact:
+    if how.get("core"):
+        names = ", ".join(c["name"] for c in how["core"])
+        decks_note = f"Other players' decks built on this player's core ({names})"
+    elif h2h.exact:
         decks_note = "Other players running this player's exact deck with only this card changed"
     else:
         decks_note = (

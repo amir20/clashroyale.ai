@@ -278,17 +278,23 @@
             {@const swap = s.replace.candidates[0]}
             <h2 class="text-2xl lg:text-3xl">{swap || weak?.real ? "One thing to try" : "Anything to change?"}</h2>
             {@render says(report.story.lines.replace)}
-            {#if weak}
-              <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid {swap ? 'grid-cols-[1fr_auto_1fr]' : 'grid-cols-1'} items-center gap-3">
+            {#if swap}
+              <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+                <div class="flex justify-center gap-2">{#each swap.out as c (c.id)}<div class="w-16">{@render tile(c, c.name, c.status)}</div>{/each}</div>
+                <Icon name="swap" class="w-6 h-6 text-primary" />
+                <div class="flex justify-center gap-2">{#each swap.in as c (c.id)}<div class="w-16">{@render tile(c, c.name, c.status)}</div>{/each}</div>
+                <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks built on your core</span></div>
+                {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
+              </div>
+            {:else if weak}
+              <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-1 items-center gap-3">
                 <div class="w-20 mx-auto">{@render tile(weak, weak.name)}</div>
-                {#if swap}
-                  <Icon name="swap" class="w-6 h-6 text-primary" />
-                  <div class="w-20 mx-auto">{@render tile(swap, swap.name)}</div>
-                  <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks like yours</span></div>
-                  <div class="col-span-3 text-center text-xs text-base-content/60">{swap.match?.exact ? "Players running your exact deck with only this swap" : `Decks sharing ${swap.match?.shared ?? 5}+ of your other cards`}</div>
-                  {#if swap.match?.also}<div class="col-span-3 text-center text-xs">{Math.round(swap.match.also.share * 100)}% also swapped {swap.match.also.dropped.map((c: any) => c.name).join(" + ")} for {swap.match.also.added.map((c: any) => c.name).join(" + ")}</div>{/if}
-                  {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
-                {/if}
+              </div>
+            {/if}
+            {#if s.replace.core}
+              <div class="mt-3 text-xs text-base-content/60 text-center lg:text-left" data-testid="core">
+                <span class="font-semibold text-base-content/80">Your core:</span> {s.replace.core.map((c: any) => c.name).join(", ")} · <span class="font-semibold text-base-content/80">flex:</span> {s.replace.flex.map((c: any) => c.name).join(", ")}
+                {#if s.replace.popular}<div class="mt-1">Most players with this core run {s.replace.popular.cards.map((c: any) => c.name).join(" + ")} ({s.replace.popular.games.toLocaleString()} games, {Math.round(s.replace.popular.win_rate * 100)}% won)</div>{/if}
               </div>
             {/if}
           {:else}

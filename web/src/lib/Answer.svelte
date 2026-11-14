@@ -73,11 +73,22 @@
       </li>
     {/each}
   </ul>
+  {#if data.core}
+    <p class="text-sm mt-5" data-testid="core"><span class="font-semibold">Your core</span> (players keep these): {data.core.map((c: any) => c.name).join(", ")}. <span class="font-semibold">Flex:</span> {data.flex.map((c: any) => c.name).join(", ")}.</p>
+    {#if data.popular}<p class="text-sm mt-1 opacity-80">Most players with this core run {data.popular.cards.map((c: any) => c.name).join(" + ")} ({data.popular.games.toLocaleString()} games, {pct(data.popular.win_rate)} won).</p>{/if}
+  {/if}
   {#if data.candidates.length}
-    <h4 class="text-sm font-semibold mt-5 mb-2">Worth a try{data.slot ? ` in your ${form(data.slot)} slot` : ""}</h4>
-    <div class="grid grid-cols-4 gap-2 max-w-md">
-      {#each data.candidates as c (c.id)}<CardTile card={c} status={c.status} sub={`${per100(c.gain)} · ${c.players} players`} />{/each}
-    </div>
+    <h4 class="text-sm font-semibold mt-5 mb-2">Flex swaps worth a try</h4>
+    <ul class="space-y-3 max-w-md">
+      {#each data.candidates as c, i (i)}
+        <li class="flex items-center gap-2">
+          {#each c.out as x (x.id)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
+          <span class="text-primary" aria-hidden="true">→</span>
+          {#each c.in as x (x.id)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
+          <span class="text-xs opacity-70 tabular-nums ml-auto text-right">{per100(c.gain)} {c.baseline === "core" ? "vs others with your core" : "vs yours"}<br />{c.players} players</span>
+        </li>
+      {/each}
+    </ul>
   {/if}
 {:else if id === "best_cards"}
   <ul class="space-y-3">
