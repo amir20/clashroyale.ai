@@ -156,16 +156,31 @@ export function loadPlayer(tag: string, onEvent: (e: LoadEvent) => void, them = 
   return () => source.close();
 }
 
-export async function getAnswer(tag: string, id: string): Promise<{ line: string; data: any; evidence: string[]; usage?: Usage }> {
+export async function getAnswer(tag: string, id: string): Promise<{ line: string; data: any; evidence: string[]; usage?: Usage; ref?: string }> {
   const res = await fetch(`/api/players/${encodeURIComponent(tag)}/questions/${id}`);
   if (!res.ok) throw new Error(String(res.status));
   return res.json();
 }
 
+/** One finished step of a custom question: a model call or a lookup, with what it cost. */
+export type Step =
+  | { type: "step"; kind: "model"; round: number; ms: number; at_ms: number; looks_up: string[]; input_tokens: number; output_tokens: number; finish: string | null }
+  | { type: "step"; kind: "tool"; name: string; label: string; args: Record<string, unknown>; ms: number; at_ms: number; bytes: number; rows: number; error: string | null };
+
 export type AskEvent =
   | { type: "status"; message: string }
-  | { type: "answer"; text: string; left: number; evidence: string[]; visuals: any[]; usage?: Usage }
+  | Step
+  | { type: "answer"; text: string; left: number; evidence: string[]; visuals: any[]; usage?: Usage; ref?: string }
   | { type: "error"; message: string };
+
+/** Thumbs up (1) or down (-1) on an answer, with an optional note. Saved for improving Rook. */
+export async function rateChat(ref: string, rating: 1 | -1, note?: string) {
+  await fetch(`/api/chats/${encodeURIComponent(ref)}/rating`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rating, note: note || null }),
+  });
+}
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 

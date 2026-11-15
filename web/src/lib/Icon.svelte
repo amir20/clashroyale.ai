@@ -13,6 +13,12 @@
     trend: "M3 17l6-6 4 4 8-8M15 7h6v6",
     star: "M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z",
     bolt: "M13 2L4 14h7l-1 8 9-12h-7z",
+    send: "M12 19V5M5 12l7-7 7 7",
+    back: "M15 18l-6-6 6-6",
+    check: "M20 6L9 17l-5-5",
+    clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2",
+    thumb: "M7 10v11M15 5.9L14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8a2 2 0 0 1-1.9 1.4H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.8a2 2 0 0 0 1.8-1.1L12 2a3.1 3.1 0 0 1 3 3.9z",
+    chevron: "M6 9l6 6 6-6",
   } as const;
   export type IconName = keyof typeof PATHS;
 </script>

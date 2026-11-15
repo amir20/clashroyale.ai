@@ -46,6 +46,8 @@ h1, h2, .game { font-family: var(--font-game); font-weight: 400; letter-spacing:
 h1, .game-shadow { text-shadow: 0 3px 0 rgb(0 0 0 / 0.45); }
 .stat-num { font-family: var(--font-game); font-weight: 400; letter-spacing: 0.01em; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .panel { background: var(--color-base-200); border: 1px solid color-mix(in oklab, var(--color-base-content) 9%, transparent); border-radius: var(--radius-box); }
+/* The chat box shows focus by its background, not a second ring around the field. */
+.composer:focus, .composer:focus-visible { outline: none; }
 /* What Rook says: a clean quote, not a bubble. */
 .says { border-left: 2px solid var(--color-primary); padding-left: 0.875rem; line-height: 1.55; }
 

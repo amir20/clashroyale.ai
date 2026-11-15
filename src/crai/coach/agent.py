@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from crai.analysis import insights
 from crai.coach import prompts, voice
+from crai.coach.chats import new_chat
 from crai.coach.tools import CoachContext, player_tools, tool_schema, without_art
 
 log = logging.getLogger(__name__)
@@ -87,25 +88,41 @@ def _only_swaps(visuals: list[dict[str, Any]]) -> bool:
     return bool(visuals) and all(v["type"] == "swap" for v in visuals)
 
 
+def _rows(result: Any) -> int:
+    """How many records a tool returned: list items, including lists one level down."""
+    if isinstance(result, list):
+        return len(result)
+    if isinstance(result, dict):
+        return sum(len(v) for v in result.values() if isinstance(v, list))
+    return 0
+
+
+def _ms(since: float) -> int:
+    return round((time.monotonic() - since) * 1000)
+
+
 async def ask_coach(
-    svc: CoachContext, tag: str, question: str, left: int, history: list[Turn]
+    svc: CoachContext,
+    tag: str,
+    question: str,
+    left: int,
+    history: list[Turn],
+    client: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Answer a custom question. Every path ends in an `answer` or `error` event.
 
     The whole exchange is saved to `svc.chats`, however it ends, so a bad answer can be read
-    back with `crai chats`.
+    back with `crai chats`. The answer carries the chat's `ref` so the visitor can rate it.
     """
-    chat: dict[str, Any] = {
-        "tag": tag,
-        "question": question,
-        "history": [t.model_dump() for t in history],
-        "transcript": [],
-        "model": svc.settings.openrouter_model,
-    }
+    chat = new_chat("question", tag, question, client or {})
+    chat["history"] = [t.model_dump() for t in history]
+    chat["model"] = svc.settings.openrouter_model
     started = time.monotonic()
     try:
         async for event in _ask_coach(svc, tag, question, left, history, chat):
-            if event["type"] in {"answer", "error"}:
+            if event["type"] == "step":
+                chat["steps"].append(event)
+            elif event["type"] in {"answer", "error"}:
                 chat["final"] = event
             yield event
     except Exception as e:
@@ -114,7 +131,6 @@ async def ask_coach(
         chat["final"] = error | {"exception": repr(e)}
         yield error
     finally:
-        chat["cost_usd"] = chat.pop("spent", {}).get("cost_usd")
         chat["seconds"] = round(time.monotonic() - started, 2)
         chat["transcript"] = [m for m in chat["transcript"] if m.get("role") != "system"]
         svc.chats.save(chat)
@@ -128,43 +144,56 @@ async def _ask_coach(
     history: list[Turn],
     chat: dict[str, Any],
 ) -> AsyncIterator[dict[str, Any]]:
-    yield {"type": "status", "message": "Rook is thinking…"}
+    yield {"type": "status", "message": "Rook is reading your question…"}
     tools = player_tools(svc, tag)
     labels = prompts.tool_prompts()
+    schema = tool_schema()
     started = time.monotonic()
     spent: dict[str, Any] = {"rounds": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
     async with svc.lock:
         card_names = await asyncio.to_thread(lambda: sorted(svc.analyzer.card_names().values()))
+    system = prompts.system_prompt(card_names)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": prompts.system_prompt(card_names)},
+        {"role": "system", "content": system},
         *[t.model_dump() for t in history],
         {"role": "user", "content": question},
     ]
-    chat["transcript"] = messages  # filled as the loop runs; saved without the system prompt
-    chat["spent"] = spent
+    chat |= {
+        "system_prompt": system,
+        "tools": json.dumps(schema, sort_keys=True),
+        "transcript": messages,  # filled as the loop runs; saved without the system prompt
+        "spent": spent,
+    }
     headers = {"Authorization": f"Bearer {svc.settings.openrouter_key}"}
     async with httpx.AsyncClient(timeout=60, transport=svc.transport) as http:
         evidence: list[str] = []
         called: list[str] = []
         visuals: list[dict[str, Any]] = []
         for attempt in range(MAX_TOOL_ROUNDS + 1):
+            if attempt:
+                yield {"type": "status", "message": "Rook is reading what it found…"}
+            params = {
+                "model": svc.settings.openrouter_model,
+                # The first turn must look at data, so no answer is ever ungrounded.
+                "tool_choice": "required" if attempt == 0 else "auto",
+                # The limit includes the model's reasoning, so leave room for both.
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "reasoning": {"effort": "low"},
+                "usage": {"include": True},
+            }
+            asked = time.monotonic()
             resp = await http.post(
                 OPENROUTER_URL,
                 headers=headers,
-                json={
-                    "model": svc.settings.openrouter_model,
-                    "messages": messages,
-                    "tools": tool_schema(),
-                    # The first turn must look at data, so no answer is ever ungrounded.
-                    "tool_choice": "required" if attempt == 0 else "auto",
-                    # The limit includes the model's reasoning, so leave room for both.
-                    "max_tokens": MAX_OUTPUT_TOKENS,
-                    "reasoning": {"effort": "low"},
-                    "usage": {"include": True},
-                },
+                json=params | {"messages": messages, "tools": schema},
             )
+            request = {"params": params, "messages": len(messages), "status": resp.status_code}
+            chat["requests"].append(request)
+            if resp.is_error:
+                request["error"] = resp.text[:4000]
             resp.raise_for_status()
             body = resp.json()
+            request |= {"ms": _ms(asked), "response": body}
             choice = body["choices"][0]
             msg = choice["message"]
             used = body.get("usage") or {}
@@ -173,6 +202,20 @@ async def _ask_coach(
             spent["output_tokens"] += used.get("completion_tokens") or 0
             spent["cost_usd"] += used.get("cost") or 0.0
             calls = msg.get("tool_calls") or []
+            messages.append(msg)
+            yield {
+                "type": "step",
+                "kind": "model",
+                "round": attempt + 1,
+                "ms": request["ms"],
+                "at_ms": _ms(started),
+                "looks_up": [
+                    labels.get(c["function"]["name"], ("the numbers", ""))[0] for c in calls
+                ],
+                "input_tokens": used.get("prompt_tokens") or 0,
+                "output_tokens": used.get("completion_tokens") or 0,
+                "finish": choice.get("finish_reason"),
+            }
             if not calls:
                 text = _finished_text(msg.get("content"), choice.get("finish_reason"))
                 _log_call(
@@ -193,33 +236,40 @@ async def _ask_coach(
                     "left": left,
                     "evidence": evidence,
                     "visuals": visuals,
+                    "ref": chat["ref"],
                 }
                 if svc.settings.dev:
-                    elapsed = round(time.monotonic() - started, 2)
                     answer["usage"] = spent | {
                         "model": svc.settings.openrouter_model,
-                        "seconds": elapsed,
+                        "seconds": round(time.monotonic() - started, 2),
                     }
                 yield answer
                 return
-            messages.append(msg)
             for call in calls:
                 name = call["function"]["name"]
                 called.append(name)
                 label = labels.get(name, ("the numbers", ""))[0]
                 yield {"type": "status", "message": f"Checking {label}…"}
+                ran = time.monotonic()
+                args: dict[str, Any] = {}
                 if name not in tools:
                     result: Any = {"error": "unknown tool"}
                 else:
-                    args = json.loads(call["function"].get("arguments") or "{}")
-                    async with svc.lock:
-                        try:
-                            result = await asyncio.to_thread(tools[name], args)
-                        except ValueError as e:
-                            result = {"error": str(e)}
+                    try:
+                        args = json.loads(call["function"].get("arguments") or "{}")
+                    except ValueError:
+                        result = {"error": "arguments were not valid JSON"}
+                    else:
+                        async with svc.lock:
+                            try:
+                                result = await asyncio.to_thread(tools[name], args)
+                            except ValueError as e:
+                                result = {"error": str(e)}
+                sent = json.dumps(without_art(result), default=str)
+                failed = isinstance(result, dict) and "error" in result
                 if (fact := voice.evidence(name, result)) and fact not in evidence:
                     evidence.append(fact)
-                is_visual = isinstance(result, dict) and "type" in result and "error" not in result
+                is_visual = isinstance(result, dict) and "type" in result and not failed
                 if (
                     name.startswith("show_")
                     and is_visual
@@ -227,19 +277,33 @@ async def _ask_coach(
                     and len(visuals) < MAX_VISUALS
                 ):
                     visuals.append(result)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "content": json.dumps(without_art(result), default=str),
-                    }
-                )
+                yield {
+                    "type": "step",
+                    "kind": "tool",
+                    "name": name,
+                    "label": label,
+                    "args": args,
+                    "ms": _ms(ran),
+                    "at_ms": _ms(started),
+                    "bytes": len(sent.encode()),
+                    "rows": _rows(result),
+                    "error": result["error"] if failed else None,
+                }
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": sent})
+                # The full result, images included, for reading back later; never sent.
+                chat["tool_results"].append({"id": call["id"], "name": name, "result": result})
     yield {"type": "error", "message": "I went down a rabbit hole. Ask me that a simpler way."}
 
 
-async def suggest_questions(svc: CoachContext, tag: str, body: SuggestRequest) -> dict[str, Any]:
+async def suggest_questions(
+    svc: CoachContext, tag: str, body: SuggestRequest, client: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Follow-up questions from the model. On any failure, the UI keeps the built-in ones."""
     a = svc.analyzer
+    chat = new_chat("suggestions", tag, "(follow-up suggestions)", client or {})
+    chat["history"] = [t.model_dump() for t in body.history]
+    chat["model"] = svc.settings.openrouter_model
+    started = time.monotonic()
 
     def facts() -> dict[str, Any]:
         return insights.overview(a, tag, insights.games(a, tag))
@@ -254,27 +318,34 @@ async def suggest_questions(svc: CoachContext, tag: str, body: SuggestRequest) -
             f"Already asked or on offer: {'; '.join(body.asked) or 'nothing'}\n"
             f"Conversation:\n{talk}"
         )
-        started = time.monotonic()
+        system = prompts.suggestions_prompt()
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": context}]
+        params = {
+            "model": svc.settings.openrouter_model,
+            "max_tokens": 700,
+            "reasoning": {"effort": "low"},
+            "usage": {"include": True},
+        }
+        chat |= {"system_prompt": system, "transcript": messages[1:]}
         async with httpx.AsyncClient(timeout=30, transport=svc.transport) as http:
             resp = await http.post(
                 OPENROUTER_URL,
                 headers={"Authorization": f"Bearer {svc.settings.openrouter_key}"},
-                json={
-                    "model": svc.settings.openrouter_model,
-                    "messages": [
-                        {"role": "system", "content": prompts.suggestions_prompt()},
-                        {"role": "user", "content": context},
-                    ],
-                    "max_tokens": 700,
-                    "reasoning": {"effort": "low"},
-                    "usage": {"include": True},
-                },
+                json=params | {"messages": messages},
             )
+        request: dict[str, Any] = {"params": params, "status": resp.status_code, "ms": _ms(started)}
+        chat["requests"].append(request)
         resp.raise_for_status()
         payload = resp.json()
-        text = payload["choices"][0]["message"].get("content")
-    except httpx.HTTPError, KeyError, ValueError, LookupError:
+        request["response"] = payload
+        message = payload["choices"][0]["message"]
+        chat["transcript"].append(message)
+        text = message.get("content")
+    except httpx.HTTPError, KeyError, ValueError, LookupError, TypeError, AttributeError:
         log.warning("could not suggest questions for %s", tag, exc_info=True)
+        chat["final"] = {"type": "error", "message": "no suggestions"}
+        chat["seconds"] = round(time.monotonic() - started, 2)
+        svc.chats.save(chat)
         return {"suggestions": []}
     result: dict[str, Any] = {"suggestions": parse_suggestions(text, body.asked)}
     used = payload.get("usage") or {}
@@ -288,6 +359,10 @@ async def suggest_questions(svc: CoachContext, tag: str, body: SuggestRequest) -
         "seconds": seconds,
     }
     _log_call("suggestions", tag, " / ".join(result["suggestions"]), usage, usage["model"], seconds)
+    text_shown = " / ".join(result["suggestions"])
+    chat |= {"spent": usage, "seconds": seconds, "final": {"type": "answer", "text": text_shown}}
+    chat["final"]["suggestions"] = result["suggestions"]
+    svc.chats.save(chat)
     if svc.settings.dev:
         result["usage"] = usage
     return result

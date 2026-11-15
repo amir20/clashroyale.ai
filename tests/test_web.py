@@ -113,6 +113,7 @@ def test_custom_question_uses_tools_then_answers(db_path: Path) -> None:
     with client(db_path, ai, "k") as c:
         out = events(c.post(f"/api/players/{ME[1:]}/ask", json={"question": "How am I?"}).text)
     assert any("your overview" in e.get("message", "") for e in out)
+    assert len(out[-1].pop("ref")) == 32
     assert out[-1] == {
         "type": "answer",
         "text": "Your deck. Tragic.",
@@ -498,9 +499,70 @@ def test_every_custom_question_is_saved_with_its_tool_calls(db_path: Path) -> No
     assert chat is not None
     assert chat["history"] == [{"role": "user", "content": "hi"}]
     roles = [m["role"] for m in chat["transcript"]]
-    assert roles == ["user", "user", "assistant", "tool"]  # no system prompt
+    assert roles == ["user", "user", "assistant", "tool", "assistant"]  # no system prompt
     assert chat["transcript"][2]["tool_calls"][0]["function"]["name"] == "get_overview"
     assert "wins" in chat["transcript"][3]["content"]
+    assert chat["transcript"][4]["content"] == "Your deck. Tragic."
+    assert chat["kind"] == "question"
+    assert chat["rounds"] == 2
+    assert len(chat["requests"]) == 2
+    assert chat["requests"][0]["params"]["tool_choice"] == "required"
+    assert chat["requests"][1]["response"]["choices"][0]["message"]["content"]
+    assert [r["name"] for r in chat["tool_results"]] == ["get_overview"]
+    assert "Rook" in chat["system_prompt_text"]
+    assert "get_overview" in chat["tools_text"]
+    assert len(chat["who"]) == 16  # a hash, never the IP
+    assert chat["user_agent"] == "testclient"
+
+
+def test_each_step_says_how_long_it_took_and_how_much_came_back(db_path: Path) -> None:
+    with client(db_path, ai, "k") as c:
+        out = events(c.post(f"/api/players/{ME[1:]}/ask", json={"question": "How am I?"}).text)
+    steps = [e for e in out if e["type"] == "step"]
+    assert [s["kind"] for s in steps] == ["model", "tool", "model"]
+    first, tool, last = steps
+    assert first["looks_up"] == ["your overview"]
+    assert tool["label"] == "your overview"
+    assert tool["bytes"] > 100
+    assert tool["rows"] > 0
+    assert tool["error"] is None
+    assert last["looks_up"] == []
+    assert all(s["ms"] >= 0 and s["at_ms"] >= s["ms"] for s in steps)
+    log = ChatLog(db_path.with_name("app.db"))
+    (row,) = log.recent()
+    saved = log.get(row["id"])
+    assert saved is not None
+    assert saved["steps"] == steps
+
+
+def test_visitors_can_rate_an_answer(db_path: Path) -> None:
+    with client(db_path, ai, "k") as c:
+        out = events(c.post(f"/api/players/{ME[1:]}/ask", json={"question": "How am I?"}).text)
+        ref = out[-1]["ref"]
+        rated = c.post(f"/api/chats/{ref}/rating", json={"rating": -1, "note": "same card"})
+        assert rated.status_code == 200
+        assert c.post("/api/chats/nope/rating", json={"rating": 1}).status_code == 404
+        assert c.post(f"/api/chats/{ref}/rating", json={"rating": 5}).status_code == 422
+    log = ChatLog(db_path.with_name("app.db"))
+    (row,) = log.recent(disliked=True)
+    assert row["rating"] == -1
+    chat = log.get(ref)
+    assert chat is not None
+    assert chat["note"] == "same card"
+
+
+def test_prefilled_answers_and_suggestions_are_saved(db_path: Path) -> None:
+    with client(db_path, suggester, "k") as c:
+        answer = c.get(f"/api/players/{ME[1:]}/questions/best_deck").json()
+        c.post(f"/api/players/{ME[1:]}/suggestions", json={"history": [], "asked": []})
+    log = ChatLog(db_path.with_name("app.db"))
+    preset = log.get(answer["ref"])
+    assert preset is not None
+    assert preset["kind"] == "preset"
+    assert preset["question"] == "What's my best deck?"
+    assert preset["reply"] == answer["line"]
+    (suggested,) = log.recent(kind="suggestions")
+    assert suggested["outcome"] == "answer"
 
 
 def test_failed_questions_are_saved_too(db_path: Path) -> None:

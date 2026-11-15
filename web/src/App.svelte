@@ -210,10 +210,9 @@
         <Story {report} {them} active={view === "story"} onCard={tappable} onGoal={(label, id) => openChat(label, id)} onAsk={() => openChat()} onReset={reset} onPlayer={visit} onBack={back} />
       </div>
       <div class="fixed inset-0 z-10 bg-base-100 overflow-y-auto" class:hidden={view !== "chat"} data-testid="chat">
-        <div class="mx-auto max-w-2xl px-6 pt-4 pb-12">
-          <button class="btn btn-ghost btn-sm -ml-3 mb-4 font-medium cursor-pointer" onclick={() => (view = "story")}>← Your story</button>
-          <Ask bind:this={chat} {tag} {report} onCard={tappable} />
-          <footer class="mt-12 text-xs text-base-content/40 text-center pb-[env(safe-area-inset-bottom)]">
+        <div class="mx-auto max-w-2xl px-4">
+          <Ask bind:this={chat} {tag} {report} onCard={tappable} onBack={() => (view = "story")} />
+          <footer class="pt-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] text-xs text-base-content/40 text-center">
             This material is unofficial and is not endorsed by Supercell. For more information see
             <a class="underline" href="https://www.supercell.com/fan-content-policy" target="_blank" rel="noreferrer">Supercell's Fan Content Policy</a>.
           </footer>

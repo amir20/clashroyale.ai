@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from crai.coach.agent import Ask, SuggestRequest, ask_coach, suggest_questions
 from crai.collect.client import normalize_tag
@@ -28,6 +29,20 @@ from crai.web.service import (
 DAILY_SUGGESTIONS = 40
 
 log = logging.getLogger(__name__)
+
+
+class Rating(BaseModel):
+    rating: int = Field(ge=-1, le=1)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+def client_info(request: Request) -> dict[str, Any]:
+    """Who asked, for saved chats: a hashed IP (never the IP itself) and the browser."""
+    ip = request.client.host if request.client else "unknown"
+    return {
+        "who": hashlib.sha256(ip.encode()).hexdigest()[:16],
+        "user_agent": request.headers.get("user-agent", "")[:300],
+    }
 
 
 async def as_stream(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
@@ -109,14 +124,14 @@ def create_app(
         )
 
     @app.get("/api/players/{tag}/questions/{question}")
-    async def question(tag: str, question: QuestionId) -> dict[str, Any]:
+    async def question(tag: str, question: QuestionId, request: Request) -> dict[str, Any]:
         try:
             normalized = normalize_tag(tag)
         except ValueError as e:
             raise HTTPException(400, "bad tag") from e
         started = time.monotonic()
         async with svc.lock:
-            result = await asyncio.to_thread(svc.answer, normalized, question)
+            result = await asyncio.to_thread(svc.answer, normalized, question, client_info(request))
         if svc.settings.dev:  # pre-filled answers are computed, so they never spend AI money
             elapsed = round(time.monotonic() - started, 2)
             result["usage"] = {"model": None, "cost_usd": 0.0, "seconds": elapsed}
@@ -136,7 +151,9 @@ def create_app(
         if left is None:
             raise HTTPException(429, "daily_limit")
         return StreamingResponse(
-            as_stream(ask_coach(svc, normalized, body.question, left, body.history)),
+            as_stream(
+                ask_coach(svc, normalized, body.question, left, body.history, client_info(request))
+            ),
             media_type="text/event-stream",
             headers=stream_headers,
         )
@@ -153,7 +170,13 @@ def create_app(
         who = hashlib.sha256(f"suggest:{ip}".encode()).hexdigest()
         if not svc.settings.dev and svc.usage.take(who, DAILY_SUGGESTIONS) is None:
             return {"suggestions": []}
-        return await suggest_questions(svc, normalized, body)
+        return await suggest_questions(svc, normalized, body, client_info(request))
+
+    @app.post("/api/chats/{ref}/rating")
+    async def rate(ref: str, body: Rating) -> dict[str, bool]:
+        if not await asyncio.to_thread(svc.chats.rate, ref, body.rating, body.note):
+            raise HTTPException(404, "no such chat")
+        return {"ok": True}
 
     dist = PROJECT_ROOT / "web" / "dist"
     if dist.is_dir():

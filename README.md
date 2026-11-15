@@ -167,8 +167,23 @@ Per-player questions (`player_profile`, `player_cards`) and `run_sql` read SQLit
 | `data/clash.db` | SQLite database, the source of truth | No |
 | `data/clash.db.snapshot/` | Parquet snapshot; rebuildable from the DB | No |
 | `data/.crawl.lock` | prevents two crawls at once | No |
+| `data/app.db` | Rook's daily question counts and saved chats | No |
 | `data/ml/` | exported battles, trained models, `model.json` for the server | No |
 | `src/crai/` | the code (see [Layout](#layout)) | Yes |
+
+### Rook's saved chats
+
+Every question asked of Rook is saved to `data/app.db` for 180 days, so bad answers can be
+found and fixed: the question, earlier turns, each model call (request settings, raw response,
+reasoning, tokens, cost), each tool call with its full result, timings, the system prompt
+version, and the visitor's thumbs up or down with their note. IPs are stored only as a hash.
+
+```sh
+uv run crai chats                 # newest 20
+uv run crai chats --disliked      # answers rated thumbs down
+uv run crai chats --failed        # errors
+uv run crai chats 42 --full       # one chat: transcript, steps, prompt
+```
 
 ### Deck models
 

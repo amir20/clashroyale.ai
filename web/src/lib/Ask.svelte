@@ -1,13 +1,33 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import { askRook, getAnswer, getSuggestions, type ChatTurn, type Report, type Usage } from "./api";
+  import { onDestroy, tick } from "svelte";
+  import { askRook, getAnswer, getSuggestions, rateChat, type ChatTurn, type Report, type Step, type Usage } from "./api";
   import Answer from "./Answer.svelte";
+  import Icon from "./Icon.svelte";
   import Rook, { type Mood } from "./Rook.svelte";
   import Visual from "./Visual.svelte";
 
-  let { tag, report, onCard }: { tag: string; report: Report; onCard?: (card: any) => void } = $props();
+  let { tag, report, onCard, onBack }: { tag: string; report: Report; onCard?: (card: any) => void; onBack?: () => void } = $props();
 
-  type Turn = { key: number; q: string; id?: string; status?: string; line?: string; data?: any; failed?: boolean; usage?: Usage; evidence?: string[]; visuals?: any[] };
+  type Turn = {
+    key: number;
+    q: string;
+    id?: string;
+    status?: string;
+    line?: string;
+    data?: any;
+    failed?: boolean;
+    usage?: Usage;
+    evidence?: string[];
+    visuals?: any[];
+    started: number;
+    seconds?: number;
+    steps: Step[];
+    ref?: string;
+    rating?: 1 | -1;
+    note?: string;
+    noteSent?: boolean;
+    showSteps?: boolean;
+  };
   type Option = { label: string; id?: string };
 
   let turns = $state<Turn[]>([]);
@@ -20,9 +40,21 @@
   let draft = $state("");
   let busy = $state(false);
   let left = $state<number | null>(null);
+  let now = $state(performance.now());
   let key = 0;
   let suggestRun = 0;
   const offered = new Set<string>(); // every suggestion shown so far, so they don't come back
+
+  // One clock for the running timer; it only ticks while Rook is working.
+  let clock: ReturnType<typeof setInterval> | undefined;
+  $effect(() => {
+    if (busy && !clock) clock = setInterval(() => (now = performance.now()), 100);
+    if (!busy && clock) {
+      clearInterval(clock);
+      clock = undefined;
+    }
+  });
+  onDestroy(() => clearInterval(clock));
 
   const digging = ["Digging through your battles…", "Doing the math so you don't have to…", "Checking the receipts…"];
   const mood = $derived<Mood>(busy ? "thinking" : turns.at(-1)?.failed ? "oops" : turns.length ? "smug" : "idle");
@@ -35,8 +67,32 @@
       ? `${u.model} · ${u.rounds} ${u.rounds === 1 ? "call" : "calls"} · ${u.input_tokens?.toLocaleString()} in / ${u.output_tokens?.toLocaleString()} out · ${usd(u.cost_usd)} · ${u.seconds}s`
       : `no AI used · ${usd(0)} · ${u.seconds}s`;
 
+  const secs = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)}s`);
+  const size = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`);
+  const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+  const elapsed = (t: Turn) => (t.seconds ?? (now - t.started) / 1000).toFixed(1);
+  const lookups = (t: Turn) => t.steps.filter((s) => s.kind === "tool") as Extract<Step, { kind: "tool" }>[];
+
+  /** One step, in plain words: what Rook did and what came back. */
+  function describe(s: Step, first: boolean): { title: string; detail: string } {
+    if (s.kind === "tool") {
+      const detail = s.error ? `Failed: ${s.error}` : `${s.rows ? `${plural(s.rows, "record")} · ` : ""}${size(s.bytes)}`;
+      return { title: s.label.charAt(0).toUpperCase() + s.label.slice(1), detail };
+    }
+    const detail = report.dev ? `${s.input_tokens.toLocaleString()} tokens in · ${s.output_tokens.toLocaleString()} out` : "";
+    const verb = first ? "Read your question" : "Read what it found";
+    const n = s.looks_up.length;
+    const next = n ? ` and picked ${n === 1 ? "1 thing" : `${n} things`} to look up` : " and wrote the answer";
+    return { title: verb + next, detail };
+  }
+
   function update(k: number, patch: Partial<Turn>) {
     turns = turns.map((t) => (t.key === k ? { ...t, ...patch } : t));
+  }
+
+  function finish(k: number, patch: Partial<Turn>) {
+    const t = turns.find((x) => x.key === k);
+    update(k, { status: undefined, seconds: t ? (performance.now() - t.started) / 1000 : undefined, ...patch });
   }
 
   /** The conversation so far, for the model's memory. */
@@ -58,8 +114,9 @@
     suggestRun++; // any suggestions still on their way are now out of date
     thinkingOfMore = false;
     busy = true;
+    now = performance.now();
     const k = ++key;
-    turns = [...turns, { key: k, q, id, status }];
+    turns = [...turns, { key: k, q, id, status, started: now, steps: [] }];
     await tick();
     document.getElementById(`turn-${k}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
     return k;
@@ -92,9 +149,9 @@
     const k = await begin(label, id, digging[key % digging.length]);
     try {
       const a = await getAnswer(tag, id);
-      update(k, { status: undefined, line: a.line, data: a.data, usage: a.usage, evidence: a.evidence });
+      finish(k, { line: a.line, data: a.data, usage: a.usage, evidence: a.evidence, ref: a.ref });
     } catch {
-      update(k, { status: undefined, line: "Something broke, and for once it wasn't your deck. Try again.", failed: true });
+      finish(k, { line: "Something broke, and for once it wasn't your deck. Try again.", failed: true });
     }
     busy = false;
     suggestNext();
@@ -107,20 +164,34 @@
     try {
       await askRook(tag, q, earlier, (ev) => {
         if (ev.type === "status") update(k, { status: ev.message });
+        else if (ev.type === "step") update(k, { steps: [...(turns.find((t) => t.key === k)?.steps ?? []), ev] });
         else if (ev.type === "answer") {
-          update(k, { status: undefined, line: ev.text, usage: ev.usage, evidence: ev.evidence, visuals: ev.visuals });
+          finish(k, { line: ev.text, usage: ev.usage, evidence: ev.evidence, visuals: ev.visuals, ref: ev.ref });
           left = ev.left;
-        } else update(k, { status: undefined, line: ev.message, failed: true });
+        } else finish(k, { line: ev.message, failed: true });
       });
     } catch {
-      update(k, { status: undefined, line: "I lost the connection. Ask me again.", failed: true });
+      finish(k, { line: "I lost the connection. Ask me again.", failed: true });
     }
     // Never leave a question spinning: if the stream ended without an answer, say so.
     if (turns.find((t) => t.key === k)?.status) {
-      update(k, { status: undefined, line: "I lost my train of thought. Ask me again.", failed: true });
+      finish(k, { line: "I lost my train of thought. Ask me again.", failed: true });
     }
     busy = false;
     suggestNext();
+  }
+
+  function rate(t: Turn, rating: 1 | -1) {
+    if (!t.ref || t.rating === rating) return;
+    update(t.key, { rating });
+    rateChat(t.ref, rating).catch(() => {});
+  }
+
+  function sendNote(e: SubmitEvent, t: Turn) {
+    e.preventDefault();
+    if (!t.ref || !t.note?.trim()) return;
+    update(t.key, { noteSent: true });
+    rateChat(t.ref, -1, t.note.trim()).catch(() => {});
   }
 
   /** Ask from outside the chat: a goal, or a choice on a card. */
@@ -137,72 +208,152 @@
   function submit(e: SubmitEvent) {
     e.preventDefault();
     const q = draft.trim();
+    if (q.length < 3) return;
     draft = "";
     custom(q);
   }
 </script>
 
-<div class="flex items-center gap-3 mb-4">
-  <Rook {mood} size={56} />
-  <div>
-    <h2 class="text-xl">Ask Rook</h2>
-    <p class="text-sm text-base-content/70">Go on. I've seen your games.</p>
-  </div>
-</div>
-
-<div class="space-y-6" aria-live="polite">
-  {#each turns as t (t.key)}
-    <div id={`turn-${t.key}`} class="pop scroll-mt-4">
-      <p class="text-sm font-semibold">{t.q}</p>
-      <div class="panel mt-2 p-4">
-        {#if t.status}
-          <span class="flex items-center gap-2 text-sm"><span class="loading loading-dots loading-sm text-primary"></span>{t.status}</span>
-        {:else}
-          <p class="says">{t.line}</p>
-          {#if t.id && t.data}<div class="mt-4"><Answer id={t.id} data={t.data} /></div>{/if}
-          {#each t.visuals ?? [] as v, i (i)}<div class="mt-4"><Visual visual={v} {onCard} /></div>{/each}
-          {#if t.evidence?.length}
-            <p class="mt-4 pt-3 border-t border-base-content/10 text-xs text-base-content/70" data-testid="evidence"><span class="font-semibold text-base-content">Based on:</span> {t.evidence.join(" · ")}</p>
-          {/if}
-        {/if}
+<div class="flex min-h-svh flex-col">
+  <header class="sticky top-0 z-10 -mx-4 flex items-center gap-2 bg-base-100/95 px-2 pt-[env(safe-area-inset-top)] backdrop-blur-md">
+    <button class="grid h-11 w-11 shrink-0 cursor-pointer place-items-center rounded-full hover:bg-base-200" aria-label="Back to your story" onclick={() => onBack?.()}>
+      <Icon name="back" class="h-5 w-5" />
+    </button>
+    <div class="flex min-w-0 items-center gap-2.5 py-2">
+      <div class="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-full bg-base-200"><Rook {mood} size={34} /></div>
+      <div class="min-w-0 leading-tight">
+        <h2 class="text-lg">Rook</h2>
+        <p class="truncate text-xs text-base-content/60">{busy ? "Working on it…" : "Your deck coach"}</p>
       </div>
-      {#if t.usage}<p class="font-mono text-[11px] text-accent mt-1 px-1 break-words" data-testid="dev-usage">{usageLine(t.usage)}</p>{/if}
     </div>
-  {/each}
-</div>
+  </header>
 
-<div class={turns.length ? "mt-6" : ""}>
-  {#if turns.length && (options.length || thinkingOfMore)}
-    <p class="text-sm font-medium mb-2">Ask next</p>
-  {/if}
-  <div class="grid gap-2" data-testid="options">
-    {#each options as o (o.label)}
-      <button class="panel px-4 py-3 text-left text-sm font-medium flex items-center justify-between gap-2 transition cursor-pointer hover:border-primary/60 disabled:opacity-50 disabled:cursor-not-allowed" disabled={busy} onclick={() => pick(o)}>
-        <span>{o.label}</span><span class="text-primary" aria-hidden="true">→</span>
-      </button>
-    {/each}
-  </div>
-  {#if thinkingOfMore}
-    <p class="flex items-center gap-2 text-sm text-base-content/70 mt-3" data-testid="thinking-more"><span class="loading loading-dots loading-xs text-primary"></span>Rook is thinking of what you should ask next…</p>
-  {/if}
-  {#if suggestUsage}<p class="font-mono text-[11px] text-accent mt-1 px-1 break-words" data-testid="dev-suggest-usage">suggestions: {usageLine(suggestUsage)}</p>{/if}
-</div>
-
-<form class="mt-6" onsubmit={submit}>
-  <label class="text-sm font-medium" for="ask">Ask your own question</label>
-  {#if report.ai_enabled}
-    <div class="join w-full mt-1">
-      <input id="ask" class="input join-item w-full text-base" maxlength="300" placeholder={outOfQuestions ? "That's all for today" : "Should I use Log or Zap?"} bind:value={draft} disabled={busy || outOfQuestions} />
-      <button class="btn btn-primary join-item cursor-pointer disabled:cursor-not-allowed" disabled={busy || outOfQuestions || draft.trim().length < 3}>
-        {#if busy}<span class="loading loading-spinner loading-sm"></span>{:else}Ask{/if}
-      </button>
-    </div>
-    {#if report.dev}
-      <p class="font-mono text-[11px] text-accent mt-1" data-testid="dev-total">dev mode · no limits · session AI cost {usd(totalCost)}</p>
-    {:else}
-      <p class="text-xs text-base-content/60 mt-1">{left ?? report.custom_questions_per_day} free {left === 1 ? "question" : "questions"} left today. Rook's own suggestions count; the built-in ones don't.</p>
+  <div class="flex-1 pt-4" aria-live="polite">
+    {#if !turns.length}
+      <div class="flex flex-col items-center py-8 text-center">
+        <Rook {mood} size={96} />
+        <p class="game mt-3 text-2xl">Ask me anything</p>
+        <p class="mt-1 text-sm text-base-content/60">Go on. I've seen your games.</p>
+      </div>
     {/if}
-  {:else}
-    <p class="text-sm text-base-content/60 mt-1">Custom questions are napping for now. The ones above always work.</p>
-  {/if}
-</form>
+
+    <div class="space-y-7">
+      {#each turns as t (t.key)}
+        <article id={`turn-${t.key}`} class="scroll-mt-20 space-y-3">
+          <div class="flex justify-end">
+            <p class="max-w-[85%] rounded-3xl rounded-br-lg bg-primary px-4 py-2.5 text-[15px] font-medium leading-snug text-primary-content">{t.q}</p>
+          </div>
+
+          <div class="flex items-start gap-2.5">
+            <div class="grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-full bg-base-200"><Rook mood={t.status ? "thinking" : t.failed ? "oops" : "idle"} size={30} /></div>
+            <div class="min-w-0 flex-1 space-y-3">
+              {#if t.status || t.steps.length}
+                <!-- What Rook is doing, live; folded away once there's an answer. -->
+                {@const open = !!t.status || !!t.showSteps}
+                <div class="rounded-2xl bg-base-200/60 text-sm" data-testid="work">
+                  <button class="flex w-full items-center gap-2 px-3.5 py-2.5 text-left {t.status ? 'cursor-default' : 'cursor-pointer'}" aria-expanded={open} disabled={!!t.status} onclick={() => update(t.key, { showSteps: !t.showSteps })}>
+                    {#if t.status}
+                      <span class="loading loading-ring loading-xs shrink-0 text-primary"></span>
+                      <span class="min-w-0 flex-1 truncate">{t.status}</span>
+                    {:else}
+                      <Icon name="check" class="h-4 w-4 shrink-0 text-success" />
+                      <span class="min-w-0 flex-1 truncate text-base-content/70">
+                        {#if lookups(t).length}{plural(lookups(t).length, "lookup")} · {size(lookups(t).reduce((n, s) => n + s.bytes, 0))}{:else}Done{/if}
+                      </span>
+                    {/if}
+                    <span class="shrink-0 font-mono text-xs tabular-nums text-base-content/60" data-testid="timer">{elapsed(t)}s</span>
+                    {#if !t.status && t.steps.length}<Icon name="chevron" class="h-4 w-4 shrink-0 text-base-content/50 transition {open ? 'rotate-180' : ''}" />{/if}
+                  </button>
+                  {#if open && t.steps.length}
+                    <ol class="space-y-2.5 px-3.5 pb-3 pt-0.5" data-testid="steps">
+                      {#each t.steps as s, i (i)}
+                        {@const d = describe(s, i === 0)}
+                        <li class="flex items-start gap-2.5">
+                          <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full {s.kind === 'tool' && s.error ? 'bg-error' : s.kind === 'tool' ? 'bg-accent' : 'bg-primary'}"></span>
+                          <div class="min-w-0 flex-1">
+                            <div class="leading-snug">{d.title}</div>
+                            {#if d.detail}<div class="text-xs text-base-content/55 tabular-nums">{d.detail}</div>{/if}
+                          </div>
+                          <span class="pt-0.5 font-mono text-xs tabular-nums text-base-content/50">{secs(s.ms)}</span>
+                        </li>
+                      {/each}
+                    </ol>
+                  {/if}
+                </div>
+              {/if}
+
+              {#if !t.status}
+                <div class="rounded-3xl rounded-tl-lg bg-base-200 px-4 py-3 text-[15px] leading-relaxed {t.failed ? 'text-error' : ''}" data-testid="reply">{t.line}</div>
+                {#if t.id && t.data}<div class="rounded-2xl bg-base-200/60 p-4"><Answer id={t.id} data={t.data} /></div>{/if}
+                {#each t.visuals ?? [] as v, i (i)}<div class="rounded-2xl bg-base-200/60 p-4"><Visual visual={v} {onCard} /></div>{/each}
+
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
+                  {#if t.evidence?.length}
+                    <p class="min-w-0 flex-1 text-xs text-base-content/55" data-testid="evidence">Based on: {t.evidence.join(" · ")}</p>
+                  {:else}
+                    <span class="flex-1"></span>
+                  {/if}
+                  {#if t.ref && !t.failed}
+                    <div class="flex items-center gap-0.5" data-testid="rating">
+                      <button class="grid h-8 w-8 cursor-pointer place-items-center rounded-full transition hover:bg-base-200 {t.rating === 1 ? 'text-success' : 'text-base-content/45'}" aria-label="Good answer" aria-pressed={t.rating === 1} onclick={() => rate(t, 1)}>
+                        <Icon name="thumb" class="h-4 w-4" />
+                      </button>
+                      <button class="grid h-8 w-8 cursor-pointer place-items-center rounded-full transition hover:bg-base-200 {t.rating === -1 ? 'text-error' : 'text-base-content/45'}" aria-label="Bad answer" aria-pressed={t.rating === -1} onclick={() => rate(t, -1)}>
+                        <Icon name="thumb" class="h-4 w-4 rotate-180" />
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+                {#if t.rating === -1}
+                  {#if t.noteSent}
+                    <p class="px-1 text-xs text-base-content/60">Thanks. I'll do better.</p>
+                  {:else}
+                    <form class="flex items-center gap-2 rounded-full bg-base-200 py-1 pl-4 pr-1" onsubmit={(e) => sendNote(e, t)}>
+                      <input class="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-base-content/45" maxlength="1000" placeholder="What went wrong? (optional)" value={t.note ?? ""} oninput={(e) => update(t.key, { note: e.currentTarget.value })} />
+                      <button class="h-8 cursor-pointer rounded-full bg-base-300 px-3 text-xs font-medium disabled:opacity-40" disabled={!t.note?.trim()}>Send</button>
+                    </form>
+                  {/if}
+                {/if}
+                {#if t.usage}<p class="break-words px-1 font-mono text-[11px] text-accent" data-testid="dev-usage">{usageLine(t.usage)}</p>{/if}
+              {/if}
+            </div>
+          </div>
+        </article>
+      {/each}
+    </div>
+
+    {#if options.length || thinkingOfMore}
+      <div class="mt-7">
+        {#if turns.length}<p class="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-base-content/50">Ask next</p>{/if}
+        <div class="flex flex-wrap gap-2 {turns.length ? '' : 'justify-center'}" data-testid="options">
+          {#each options as o (o.label)}
+            <button class="cursor-pointer rounded-full bg-base-200 px-4 py-2 text-left text-sm transition hover:bg-base-300 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40" disabled={busy} onclick={() => pick(o)}>{o.label}</button>
+          {/each}
+        </div>
+        {#if thinkingOfMore}
+          <p class="mt-3 flex items-center gap-2 px-1 text-xs text-base-content/55" data-testid="thinking-more"><span class="loading loading-dots loading-xs text-primary"></span>Thinking of what you should ask next…</p>
+        {/if}
+        {#if suggestUsage}<p class="mt-1 break-words px-1 font-mono text-[11px] text-accent" data-testid="dev-suggest-usage">suggestions: {usageLine(suggestUsage)}</p>{/if}
+      </div>
+    {/if}
+  </div>
+
+  <form class="sticky bottom-0 -mx-4 mt-6 bg-gradient-to-t from-base-100 from-70% to-transparent px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-4" onsubmit={submit}>
+    {#if report.ai_enabled}
+      <div class="flex items-center gap-2 rounded-full bg-base-200 py-1.5 pl-5 pr-1.5 transition focus-within:bg-base-300">
+        <label class="sr-only" for="ask">Ask your own question</label>
+        <input id="ask" class="composer min-w-0 flex-1 bg-transparent py-1.5 text-base placeholder:text-base-content/45 disabled:cursor-not-allowed" maxlength="300" autocomplete="off" placeholder={outOfQuestions ? "That's all for today" : "Ask Rook about your deck"} bind:value={draft} disabled={busy || outOfQuestions} />
+        <button class="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full bg-primary text-primary-content transition active:scale-90 disabled:cursor-not-allowed disabled:bg-base-content/10 disabled:text-base-content/35" aria-label="Ask" disabled={busy || outOfQuestions || draft.trim().length < 3}>
+          {#if busy}<span class="loading loading-spinner loading-sm"></span>{:else}<Icon name="send" class="h-5 w-5" />{/if}
+        </button>
+      </div>
+      {#if report.dev}
+        <p class="mt-1.5 px-2 text-center font-mono text-[11px] text-accent" data-testid="dev-total">dev mode · no limits · session AI cost {usd(totalCost)}</p>
+      {:else}
+        <p class="mt-1.5 px-2 text-center text-xs text-base-content/50">{left ?? report.custom_questions_per_day} free {left === 1 ? "question" : "questions"} left today · the built-in ones are free</p>
+      {/if}
+    {:else}
+      <p class="rounded-full bg-base-200 px-5 py-3 text-center text-sm text-base-content/60">Custom questions are napping for now. The ones above always work.</p>
+    {/if}
+  </form>
+</div>

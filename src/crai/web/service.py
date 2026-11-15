@@ -16,7 +16,7 @@ import httpx
 from crai.analysis import insights, visuals
 from crai.analysis.analytics import DEFAULT_SINCE_DAYS, Analyzer
 from crai.coach import voice
-from crai.coach.chats import ChatLog
+from crai.coach.chats import ChatLog, new_chat
 from crai.collect.client import ClashClient
 from crai.config import Settings
 from crai.ml import explain
@@ -334,7 +334,25 @@ class Service:
             },
         }
 
-    def answer(self, tag: str, question: QuestionId) -> dict[str, Any]:
+    def answer(
+        self, tag: str, question: QuestionId, client: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """A pre-filled question, computed without AI. Saved like a chat, so it can be rated."""
+        chat = new_chat("preset", tag, QUESTIONS[question], client or {})
+        started = time.monotonic()
+        try:
+            result = self._answer(tag, question)
+        except Exception as e:
+            chat["final"] = {"type": "error", "message": "failed", "exception": repr(e)}
+            raise
+        else:
+            chat["final"] = {"type": "answer", "id": question} | result
+            return result | {"ref": chat["ref"]}
+        finally:
+            chat["seconds"] = round(time.monotonic() - started, 2)
+            self.chats.save(chat)
+
+    def _answer(self, tag: str, question: QuestionId) -> dict[str, Any]:
         a, items = self.analyzer, insights.games(self.analyzer, tag)
         if question == "why_losing":
             data, line, tool = (
