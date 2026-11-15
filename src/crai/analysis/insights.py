@@ -23,7 +23,7 @@ from crai.analysis.analytics import (
     shared_cards,
     special_count,
     specials,
-    variants,
+    with_variants,
 )
 from crai.collect.client import normalize_tag
 from crai.timing import Laps
@@ -867,14 +867,16 @@ def archetype(a: Analyzer, tag: str, items: list[Game]) -> Archetype | None:
     if len(mine) != 8:
         return None
     ids = [v // 10 for v in mine]
-    mask = sum(pl.col("v").list.contains(v).cast(pl.Int64) * (1 << i) for i, v in enumerate(mine))
+    mask = pl.sum_horizontal(
+        pl.col("v").list.contains(v).cast(pl.Int64) * (1 << i) for i, v in enumerate(mine)
+    )
 
     def find(field: pl.DataFrame, *, near: bool) -> Archetype | None:
-        d = (
-            field.filter(shared_cards(ids) >= MIN_CORE_CARDS)
-            .filter(pl.col("player_tag") != tag)  # after: a string compare on every deck is slow
-            .with_columns(v=variants())
-            .with_columns(mask=mask)
+        d = with_variants(
+            field.filter(shared_cards(ids) >= MIN_CORE_CARDS).filter(
+                pl.col("player_tag") != tag  # after: a string compare on every deck is slow
+            ),
+            mask=mask,
         )
         counts = d.group_by("mask").len().rows()
         who = d.select("mask", "player_tag").unique()  # small: counts players cheaply

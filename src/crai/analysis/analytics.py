@@ -269,6 +269,20 @@ def variants() -> pl.Expr:
     return plain.list.set_difference(sp.list.eval(pl.element() // 10 * 10)).list.concat(sp)
 
 
+def with_variants(decks: pl.DataFrame, **extra: pl.Expr) -> pl.DataFrame:
+    """`decks` plus `v` (see `variants`) and the `extra` columns computed from it, once per
+    distinct deck instead of once per row: 1.2M rows of decks like a player's are ~24K decks,
+    and parsing every row's specials took seconds."""
+    per_deck = (
+        decks.group_by("deck_key", "specials")
+        .agg(pl.col("cards").first())
+        .with_columns(v=variants())
+        .with_columns(**extra)
+        .drop("cards")
+    )
+    return decks.join(per_deck, on=["deck_key", "specials"], how="left", nulls_equal=True)
+
+
 def special_count() -> pl.Expr:
     """How many of the deck's slots hold an Evolution or Hero."""
     return specials().list.len()

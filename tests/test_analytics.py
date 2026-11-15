@@ -2,10 +2,11 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import polars as pl
 import pytest
 from conftest import HOG, ME, PEKKA, battle
 
-from crai.analysis.analytics import Analyzer, CardNotFound, Filters
+from crai.analysis.analytics import Analyzer, CardNotFound, Filters, variants, with_variants
 from crai.storage import database as db
 
 
@@ -151,3 +152,13 @@ def test_card_pairs_are_computed_once_per_table(analyzer: Analyzer) -> None:
     summary, rows = first
     assert summary["decks_with_card"] > 0
     assert rows.height > 0
+
+
+def test_variants_per_deck_match_variants_per_row(analyzer: Analyzer) -> None:
+    # The swap step works out each distinct deck once instead of every row (seconds on prod).
+    decks = analyzer.decks()
+    per_row = decks.with_columns(v=variants(), n=variants().list.len())
+    per_deck = with_variants(decks, n=pl.col("v").list.len())
+    key = ["battle_id", "side"]
+    assert per_deck.height == per_row.height
+    assert per_deck.sort(key).select("v", "n").equals(per_row.sort(key).select("v", "n"))
