@@ -835,8 +835,12 @@ class Analyzer:
     ) -> tuple[MatchupSummary, pl.DataFrame]:
         subject = self._containing(self._subject(f, top_only), [cid])
         wr_x = _mean(subject)
-        opp = self.decks(f).select(
-            "battle_id", pl.col("side").alias("opp_side"), pl.col("cards").alias("opp")
+        # Only the battles these decks played: joining against every deck took ~30 s on the NAS.
+        ids = subject["battle_id"].unique().implode()
+        opp = (
+            self.decks(f)
+            .filter(pl.col("battle_id").is_in(ids))
+            .select("battle_id", pl.col("side").alias("opp_side"), pl.col("cards").alias("opp"))
         )
         m = (
             subject.select("battle_id", "side", "score")
