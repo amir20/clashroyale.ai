@@ -98,6 +98,7 @@ def player_tools(svc: CoachContext, tag: str) -> dict[str, Callable[[dict[str, A
         "best_partners_for_card": lambda args: near_ranking(args["card"], "pairs"),
         "counters_for_card": lambda args: near_ranking(args["card"], "counters"),
         "top_decks_with_cards": lambda args: top_decks(args.get("cards", [])),
+        "replacements_for_card": lambda args: visuals.replacements(a, tag, items(), args["card"]),
     }
 
 
@@ -114,6 +115,7 @@ TOOL_PARAMS: dict[str, dict[str, Any]] = {
     "best_partners_for_card": {"card": {"type": "string"}},
     "counters_for_card": {"card": {"type": "string"}},
     "top_decks_with_cards": {"cards": {"type": "array", "items": {"type": "string"}}},
+    "replacements_for_card": {"card": {"type": "string"}},
 }
 
 

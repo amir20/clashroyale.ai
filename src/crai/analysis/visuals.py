@@ -157,6 +157,67 @@ def swap_view(
     }
 
 
+MAX_REPLACEMENTS = 5  # candidates judged head to head; each one is a filter over the pool
+
+
+def replacements(a: Analyzer, tag: str, items: list[Game], out_card: str) -> dict[str, Any]:
+    """What other players with the player's other cards run in this card's slot, and how each
+    one does against the card itself, head to head (the same test as `swap_view`)."""
+    key = current_deck_key(items)
+    if key is None:
+        return {"error": "This player has no recent games."}
+    cards = _cards(a)
+    mine = _ids(key)
+    out_id = a.resolve_card(out_card)
+    if out_id not in mine:
+        names = ", ".join(cards[c]["name"] for c in mine if c in cards)
+        return {"error": f"{cards[out_id]['name']} isn't in their deck ({names})."}
+    others = [c for c in mine if c != out_id]
+    played = slots(a, tag, items)
+    slot = played.get(out_id, 0)
+    n_special = sum(1 for s in played.values() if s)
+    swaps = SwapField(a, tag, items, others, n_special)
+    pool, near = next(swaps.pools())
+    # Decks without the card: what fills its slot is whatever isn't one of the player's cards.
+    fills = (
+        pool.filter(~pl.col("cards").list.contains(out_id))
+        .select(pl.col("cards").explode())
+        .filter(~pl.col("cards").is_in(mine))
+        .group_by("cards")
+        .len()
+        .sort("len", descending=True)
+    )
+    tried = [c for c in fills["cards"].to_list() if c in cards and can_play(cards[c], slot)]
+    order = {"better": 0, "even": 1, "worse": 2, "unknown": 3}
+    judged = [(in_id, swaps.compare(out_id, in_id, slot)) for in_id in tried[:MAX_REPLACEMENTS]]
+    judged.sort(key=lambda j: (order[j[1].verdict], -(j[1].gap or 0.0)))  # real upgrades first
+    found = [
+        _played_as(cards[in_id], slot)
+        | {
+            "games": h2h.in_games,
+            "players": h2h.in_players,
+            "win_rate": h2h.in_rate,
+            "gap": h2h.gap,
+            "margin": h2h.margin,
+            "verdict": h2h.verdict,
+        }
+        for in_id, h2h in judged
+    ]
+    form = f" (played as {STATUS[slot]})" if slot else ""
+    return {
+        "card": _played_as(cards[out_id], slot),
+        "replacements": found,
+        "scope": (
+            f"Other players' decks sharing this player's other cards, "
+            f"{'within the player' + chr(39) + 's trophy range' if near else 'at all trophies'}. "
+            f"Each replacement is compared head to head with {cards[out_id]['name']}{form} in "
+            "the same slot: `gap` is its win rate minus the card's, per game; `verdict` says "
+            "whether the gap is bigger than the margin. Only 'better' is a real upgrade. "
+            "None of these cards is in the player's deck already."
+        ),
+    }
+
+
 def matchup_view(a: Analyzer, items: list[Game], card: str) -> dict[str, Any]:
     record = record_against(a, items, card)
     cards = _cards(a)

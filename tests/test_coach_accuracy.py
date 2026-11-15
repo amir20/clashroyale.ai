@@ -328,3 +328,20 @@ def test_trophy_range_does_not_cache_a_copy_per_player(analyzer: Analyzer) -> No
     for low in (1000, 2000, 3000):
         analyzer.decks(Filters(battle_types=("trail",), min_trophies=low, max_trophies=low + 500))
     assert len(analyzer._cache) <= before + 1
+
+
+def test_replacements_never_offer_a_card_already_in_the_deck(analyzer: Analyzer) -> None:
+    # Rook once told a player to swap Berserker for Skeleton Army, which they already ran.
+    items = insights.games(analyzer, ME)
+    view = visuals.replacements(analyzer, ME, items, "hog")
+    mine = set(insights._ids(insights.current_deck_key(items)))
+    assert view["replacements"]
+    assert not {r["id"] for r in view["replacements"]} & mine
+    verdicts = [r["verdict"] for r in view["replacements"]]
+    order = ["better", "even", "worse", "unknown"]
+    assert verdicts == sorted(verdicts, key=order.index)  # real upgrades first
+
+
+def test_replacing_a_card_they_dont_run_is_an_error(analyzer: Analyzer) -> None:
+    items = insights.games(analyzer, ME)
+    assert "isn't in their deck" in visuals.replacements(analyzer, ME, items, "pekka")["error"]

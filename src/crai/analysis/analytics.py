@@ -144,6 +144,9 @@ class SqlResult(TypedDict):
 DEFAULT_SINCE_DAYS = 7
 
 
+FORM_PREFIX = re.compile(r"^(?:hero|evo|evolved|evolution)\s+", re.IGNORECASE)
+
+
 @dataclass(frozen=True, slots=True)
 class Filters:
     """Which battles to analyse.
@@ -420,6 +423,7 @@ class Analyzer:
             for k, v in list(self._cache.items())  # a report thread may be adding entries
             if _is_decks(k)
         }
+        self._grow_latest(lambda v, f, top: grow(v, self._narrowed(new, f, top)))
         self._covered, self._seeds = covered, seeds
         log.info(
             "analytics: added %d deck rows%s in %.2fs",
@@ -438,6 +442,7 @@ class Analyzer:
         self._cache = {
             k: v.filter(keep).rechunk() for k, v in list(self._cache.items()) if _is_decks(k)
         }
+        self._grow_latest(lambda v, _f, _top: v.filter(keep).rechunk())
         self._trimmed_at = time.monotonic()
         log.info(
             "analytics: dropped %d deck rows older than %d days in %.2fs",
@@ -449,10 +454,29 @@ class Analyzer:
     def _cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
         """Memoize until the table changes (`_base` drops or grows these)."""
         if key not in self._cache:
+            if len(self._cache) > 32:  # drop small results first; filtered tables are costly
+                self._cache = {k: v for k, v in list(self._cache.items()) if _is_decks(k)}
             if len(self._cache) > 32:
                 self._cache.clear()
             self._cache[key] = fn()
         return self._cache[key]
+
+    def _narrowed(self, rows: pl.DataFrame, f: Filters, top_only: bool) -> pl.DataFrame:
+        """`rows` (new battles) cut down the way `_subject(f, top_only)` cuts the table."""
+        key = replace(f, min_trophies=None, max_trophies=None)
+        conds = [*self._conditions(key, self._kept()), *self._narrowing(f, top_only)]
+        return rows.filter(*conds) if conds else rows
+
+    def _grow_latest(self, change: Callable[[pl.DataFrame, Filters, bool], pl.DataFrame]) -> None:
+        """Carry the kept subject slice over to a changed table (new or trimmed rows), like the
+        filtered copies in `_cache`, instead of scanning everything again. Other kept values
+        are dropped."""
+        hit, self._latest = self._latest, None
+        if hit is None or self._base_df is None:
+            return
+        key = hit[1]
+        if isinstance(key, tuple) and key[0] == "subject":
+            self._latest = (id(self._base_df), key, change(hit[2], key[1], key[2]))
 
     def _latest_cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
         """Memoize only the most recent key, for the current table.
@@ -550,6 +574,12 @@ class Analyzer:
                 return int(query)
             raise CardNotFound(f"No card with id {query}")
         q = _norm(query)
+        # "Hero Berserker", "Evo Witch": the stats are per card, whichever form was played.
+        if (bare := FORM_PREFIX.sub("", query.strip())) and bare != query.strip():
+            try:
+                return self.resolve_card(bare)
+            except CardNotFound:
+                pass  # a real card name that starts with one of those words
         rows = [r for r in cards.iter_rows(named=True) if not r["is_support"]] or list(
             cards.iter_rows(named=True)
         )
@@ -627,28 +657,47 @@ class Analyzer:
         return (self.window_days or None) if self.lean else None
 
     @staticmethod
-    def _filter(d: pl.DataFrame, f: Filters, kept: int | None = None) -> pl.DataFrame:
+    def _conditions(f: Filters, kept: int | None = None) -> list[pl.Expr]:
+        """The row filters for `f`, minus the ones the lean table already satisfies (`kept`)."""
+        conds = []
         battle_type = pl.col("battle_type").fill_null("")
         if f.battle_types:
-            d = d.filter(battle_type.is_in(f.battle_types))
+            conds.append(battle_type.is_in(f.battle_types))
         elif kept is None:
-            d = d.filter(~battle_type.is_in(EXCLUDED_TYPES))
+            conds.append(~battle_type.is_in(EXCLUDED_TYPES))
         if f.deck_selection and not (kept is not None and f.deck_selection == "collection"):
-            d = d.filter(pl.col("deck_selection").fill_null("collection") == f.deck_selection)
+            conds.append(pl.col("deck_selection").fill_null("collection") == f.deck_selection)
         if f.since_days and not (kept is not None and f.since_days >= kept):
             cutoff = datetime.now(UTC) - timedelta(days=f.since_days)
-            d = d.filter(pl.col("battle_time") >= cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        return d
+            conds.append(pl.col("battle_time") >= cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return conds
+
+    @classmethod
+    def _filter(cls, d: pl.DataFrame, f: Filters, kept: int | None = None) -> pl.DataFrame:
+        conds = cls._conditions(f, kept)
+        return d.filter(*conds) if conds else d
+
+    @staticmethod
+    def _narrowing(f: Filters, top_only: bool) -> list[pl.Expr]:
+        """The filters `_subject` adds on top of `decks(f)`: top players, trophy range."""
+        conds = []
+        if top_only:
+            conds.append(pl.col("is_top") == 1)
+        if f.min_trophies is not None:
+            conds.append(pl.col("starting_trophies") >= f.min_trophies)
+        if f.max_trophies is not None:
+            conds.append(pl.col("starting_trophies") <= f.max_trophies)
+        return conds
 
     def _subject(self, f: Filters, top_only: bool) -> pl.DataFrame:
-        d = self.decks(f)
-        if top_only:
-            d = d.filter(pl.col("is_top") == 1)
-        if f.min_trophies is not None:
-            d = d.filter(pl.col("starting_trophies") >= f.min_trophies)
-        if f.max_trophies is not None:
-            d = d.filter(pl.col("starting_trophies") <= f.max_trophies)
-        return d
+        """The decks a question is about. A trophy range or top-players view is one pass over
+        the table, kept (one at a time) while the same player keeps asking."""
+        narrow = self._narrowing(f, top_only)
+        if not narrow:
+            return self.decks(f)
+        key = replace(f, min_trophies=None, max_trophies=None)
+        conds = [*self._conditions(key, self._kept()), *narrow]
+        return self._latest_cached(("subject", f, top_only), lambda: self._base().filter(*conds))
 
     @staticmethod
     def _containing(d: pl.DataFrame, ids: Sequence[int]) -> pl.DataFrame:
@@ -707,18 +756,37 @@ class Analyzer:
         synergy: win rate of X+Y decks minus win rate of all X decks.
         """
         cid = self.resolve_card(card)
+        return self._cached(
+            ("pairs", cid, f, top_only, min_games, sort_by),
+            lambda: self._card_pairs(cid, f, top_only, min_games, sort_by),
+        )
+
+    def _usage(self, f: Filters, top_only: bool) -> pl.DataFrame:
+        """Each card's share of the subject's decks. Only the card lists are exploded: exploding
+        every column of the trophy range took most of a minute on the NAS."""
+        d = self._subject(f, top_only)
+        total = max(d.height, 1)
+        return self._cached(
+            ("usage", f, top_only),
+            lambda: (
+                d.select(pl.col("cards").explode().alias("card_id"))
+                .group_by("card_id")
+                .agg(overall_rate=pl.len() / total)
+            ),
+        )
+
+    def _card_pairs(
+        self, cid: int, f: Filters, top_only: bool, min_games: int, sort_by: PairSort
+    ) -> tuple[PairsSummary, pl.DataFrame]:
         d = self._subject(f, top_only)
         total = max(d.height, 1)
         with_x = self._containing(d, [cid])
         n_x = with_x.height
         wr_x = _mean(with_x)
-        usage = (
-            d.explode("cards")
-            .group_by(pl.col("cards").alias("card_id"))
-            .agg(overall_rate=pl.len() / total)
-        )
+        usage = self._usage(f, top_only)
         p = (
-            with_x.explode("cards")
+            with_x.select("cards", "score")
+            .explode("cards")
             .filter(pl.col("cards") != cid)
             .group_by(pl.col("cards").alias("card_id"))
             .agg(games=pl.len(), wins=pl.col("score").sum())
@@ -757,6 +825,14 @@ class Analyzer:
         delta: win rate vs Y minus overall win rate of X decks.
         """
         cid = self.resolve_card(card)
+        return self._cached(
+            ("matchups", cid, f, top_only, min_games, mode),
+            lambda: self._card_matchups(cid, f, top_only, min_games, mode),
+        )
+
+    def _card_matchups(
+        self, cid: int, f: Filters, top_only: bool, min_games: int, mode: MatchupMode
+    ) -> tuple[MatchupSummary, pl.DataFrame]:
         subject = self._containing(self._subject(f, top_only), [cid])
         wr_x = _mean(subject)
         opp = self.decks(f).select(

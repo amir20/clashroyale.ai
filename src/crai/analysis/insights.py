@@ -523,15 +523,12 @@ def near_decks(a: Analyzer, items: list[Game]) -> pl.DataFrame | None:
     """`near_player` over everyone's decks. Ranked is everyone in ranked, the same for every
     ranked player: one cached view (grown as battles arrive), not a fresh copy per step.
 
-    A ladder range is kept too, but only the latest one: finding it scans every deck (32 s on
-    the NAS with 41M rows), and a report asks for it in up to five steps.
+    A ladder range is kept too, but only the latest one, and grown as battles arrive: finding
+    it scans every deck (20-30 s on the NAS with 41M rows), and a report asks for it in up to
+    five steps. It's the same slice the card questions use (`Analyzer._subject`).
     """
-    found = _trophy_range(items)
-    if found is None:
-        return None
-    if found[1] is None:
-        return a.decks(Filters(battle_types=(found[0],)))
-    return a._latest_cached(("near", found), lambda: near_player(a.decks(), items))
+    f = near_filters(items)
+    return None if f is None else a._subject(f, top_only=False)
 
 
 def near_filters(items: list[Game]) -> Filters | None:

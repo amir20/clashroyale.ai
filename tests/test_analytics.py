@@ -122,3 +122,32 @@ def test_only_the_latest_big_slice_is_kept(analyzer: Analyzer) -> None:
     analyzer._latest_cached("b", lambda: slice_for("b"))
     analyzer._latest_cached("a", lambda: slice_for("a"))  # "a" was dropped for "b"
     assert calls == ["a", "b", "a"]
+
+
+@pytest.mark.parametrize(
+    "name", ["Hero Hog Rider", "evo hog", "Evolved Hog Rider", "EVOLUTION hog"]
+)
+def test_card_forms_resolve_to_the_card(analyzer: Analyzer, name: str) -> None:
+    # Rook asked for "Hero Berserker" and got "no card matching".
+    assert analyzer.resolve_card(name) == HOG
+
+
+def test_a_trophy_range_slice_grows_with_new_battles(analyzer: Analyzer, db_path: Path) -> None:
+    ranked = Filters(battle_types=("pathOfLegend",), min_trophies=0, max_trophies=10**6)
+    before = analyzer._subject(ranked, top_only=False).height
+    new = battle(datetime.now(UTC) - timedelta(minutes=1), "#2P", "#9Q", a_wins=True)
+    with db.session(db_path) as conn:
+        assert db.ingest_battle(conn, new)
+    analyzer.refresh()  # appends the new battle, like the server's background refresher
+    grown = analyzer._subject(ranked, top_only=False)
+    assert grown.height == before + 2  # both sides of the new battle, without a rescan
+    fresh = analyzer.decks(Filters(battle_types=("pathOfLegend",)))
+    assert grown.height == fresh.height
+
+
+def test_card_pairs_are_computed_once_per_table(analyzer: Analyzer) -> None:
+    first = analyzer.card_pairs("hog")
+    assert analyzer.card_pairs("hog") is first
+    summary, rows = first
+    assert summary["decks_with_card"] > 0
+    assert rows.height > 0
