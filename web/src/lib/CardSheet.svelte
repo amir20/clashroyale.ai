@@ -38,7 +38,7 @@
     {#if picking}
       <input class="input w-full mt-4 text-base" placeholder="Find a card" aria-label="Find a card" bind:value={filter} />
       <div class="grid grid-cols-5 lg:grid-cols-8 gap-2 mt-3 max-h-[52svh] overflow-y-auto pr-1" data-testid="card-picker">
-        {#each matches as c (c.id)}
+        {#each matches as c, _k (_k)}
           <button class="cursor-pointer text-left" aria-label={c.name} onclick={() => onAsk(`Should I swap ${card.name} for ${c.name}?`)}>
             <CardTile card={c} />
             <span class="block mt-1 text-[10px] leading-tight text-center text-base-content/70">{c.name}</span>

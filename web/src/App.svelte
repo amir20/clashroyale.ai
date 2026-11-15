@@ -11,7 +11,7 @@
   let input = $state("");
   let status = $state("");
   let progress = $state(0);
-  let steps = $state<LoadStep[]>([]); // finished loading steps, newest last
+  let steps = $state<(LoadStep & { n: number })[]>([]); // finished loading steps, newest last
   let loadStarted = 0;
   let now = $state(0);
   let clock: ReturnType<typeof setInterval> | undefined;
@@ -62,7 +62,7 @@
 
   async function onEvent(e: LoadEvent) {
     if (e.type === "step") {
-      steps = [...steps, e];
+      steps = [...steps, { ...e, n: steps.length }];
     } else if (e.type === "status") {
       status = e.message;
       if (e.player) who = e.player;
@@ -207,7 +207,7 @@
           <!-- What's done so far: each step with its time and how much data it went through. -->
           <ol class="mt-4 space-y-1.5 text-left text-xs" data-testid="load-steps">
             {#if steps.length > 4}<li class="text-base-content/40 pl-5">+{steps.length - 4} earlier</li>{/if}
-            {#each steps.slice(-4) as s (s.step + s.seconds)}
+            {#each steps.slice(-4) as s (s.n)}
               <li class="pop flex items-baseline gap-2">
                 <span class="w-3 shrink-0 text-success">✓</span>
                 <span class="min-w-0 flex-1 truncate text-base-content/85">{s.label}{#if s.detail}<span class="text-base-content/50">{` · ${s.detail}`}</span>{/if}</span>

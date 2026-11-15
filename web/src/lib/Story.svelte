@@ -212,10 +212,10 @@
                       {@render tile(x.cards[0])}
                       <span class="absolute -bottom-1.5 inset-x-0 mx-auto w-fit rounded-full bg-success text-success-content text-xs font-bold px-1.5 stat-num">{x.cards[0].wins}–{x.cards[0].games - x.cards[0].wins}</span>
                     {:else if x.kind === "unique_deck"}
-                      <div class="grid grid-cols-2 gap-0.5">{#each x.deck as c (c.id)}<CardTile card={c} />{/each}</div>
+                      <div class="grid grid-cols-2 gap-0.5">{#each x.deck as c, _k (_k)}<CardTile card={c} />{/each}</div>
                     {:else if x.kind === "evolution_gap"}
                       {#if evolved.length}
-                        <div class="grid grid-cols-2 gap-0.5">{#each evolved.slice(0, 4) as c (c.id)}<CardTile card={c} />{/each}</div>
+                        <div class="grid grid-cols-2 gap-0.5">{#each evolved.slice(0, 4) as c, _k (_k)}<CardTile card={c} />{/each}</div>
                       {:else}
                         <div class="aspect-square rounded-xl bg-accent/15 text-accent grid place-items-center"><Icon name="bolt" class="w-8 h-8" /></div>
                       {/if}
@@ -244,7 +244,7 @@
                       <p class="text-sm text-base-content/70 mt-1">{x.detail}</p>
                       {#if x.cards.length > 1}
                         <div class="flex gap-3 mt-2">
-                          {#each x.cards.slice(1) as c (c.id)}
+                          {#each x.cards.slice(1) as c, _k (_k)}
                             <div class="flex items-center gap-1.5"><div class="w-7">{@render tile(c)}</div><span class="text-xs stat-num text-success">{c.wins}–{c.games - c.wins}</span></div>
                           {/each}
                         </div>
@@ -257,7 +257,7 @@
           {:else if id === "deck"}
             <h2 class="text-2xl lg:text-3xl">{them ? `${o.player.name}'s deck` : "Your deck"}</h2>
             <div class="grid grid-cols-4 gap-x-3 gap-y-4">
-              {#each o.deck as c (c.id)}{@render tile(c, c.name, c.status)}{/each}
+              {#each o.deck as c, _k (_k)}{@render tile(c, c.name, c.status)}{/each}
             </div>
             <p class="text-sm text-base-content/70">{onCard ? `${wide ? "Click" : "Tap"} any card to find out more.` : `${o.avg_elixir} average elixir.`}</p>
           {:else if id === "model" && report.model}
@@ -294,9 +294,9 @@
               <h2 class="text-2xl lg:text-3xl">One thing to try</h2>
               {@render says(s.lines.pick ?? "")}
               <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3" data-testid="model-pick">
-                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each pick.out as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
+                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each pick.out as c, _k (_k)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
                 <Icon name="swap" class="w-6 h-6 text-primary" />
-                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each pick.in as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
+                <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each pick.in as c, _k (_k)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
                 <div class="col-span-3 text-center">
                   <div class="stat-num text-2xl"><span class="text-base-content/60">{Math.round(pick.win * 100)}%</span> → <span class="text-success">{Math.round(pick.win_after * 100)}%</span></div>
                   <div class="text-xs text-base-content/60">predicted win chance {them ? report.model?.field.where.replace("your", "their") : report.model?.field.where} · {per100(pick.gain)} wins per 100</div>
@@ -370,9 +370,9 @@
               {#if swap}
                 {@const big = Math.max(swap.out.length, swap.in.length) > 2}
                 <div class="rounded-xl bg-base-200 border border-base-content/10 p-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
-                  <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.out as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
+                  <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.out as c, _k (_k)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
                   <Icon name="swap" class="w-6 h-6 text-primary" />
-                  <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.in as c (c.id)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
+                  <div class="flex flex-wrap justify-center gap-2 min-w-0">{#each swap.in as c, _k (_k)}<div class={big ? "w-12 lg:w-14" : "w-16"}>{@render tile(c, big ? undefined : c.name, c.status)}</div>{/each}</div>
                   <div class="col-span-3 text-center text-sm"><span class="stat-num text-success">+{(swap.gain * 100).toFixed(1)}</span> <span class="text-base-content/70">wins per 100 games in decks built on your core</span></div>
                   {#if swap.watch_out?.length}<div class="col-span-3 text-center text-xs text-warning">Weaker against {swap.watch_out.map((c: any) => c.name).join(", ")}</div>{/if}
                 </div>
@@ -394,7 +394,7 @@
               <h2 class="text-2xl lg:text-3xl mt-1 lg:mt-0">What do you want?</h2>
             </div>
             <div class="grid gap-2.5">
-              {#each goals as g (g.id)}
+              {#each goals as g, _k (_k)}
                 {@const art = goalArt(g.id)}
                 <button class="panel px-4 py-3 text-left cursor-pointer flex items-center gap-3 hover:border-primary/60" onclick={() => onGoal(g.label, g.id)}>
                   <span class="w-10 h-10 shrink-0 rounded-xl bg-primary/15 text-primary grid place-items-center"><Icon name={g.icon} class="w-5 h-5" /></span>

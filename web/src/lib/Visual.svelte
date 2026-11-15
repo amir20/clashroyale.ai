@@ -94,7 +94,7 @@
     <h4 class="text-sm font-semibold mb-3">{v.kind === "top" ? "Best cards right now" : v.kind === "counters" ? `What beats ${v.card.name}` : `Best with ${v.card.name}`}</h4>
     {#if v.rows.length}
       <ul class="space-y-2.5">
-        {#each v.rows as c, i (c.id)}
+        {#each v.rows as c, i (i)}
           <li class="flex items-center gap-3">
             <span class="w-4 text-xs text-base-content/50 tabular-nums">{i + 1}</span>
             <div class="w-9 shrink-0">{@render tile(c)}</div>
@@ -114,7 +114,7 @@
     {/if}
   {:else if v.type === "deck"}
     <div class="grid grid-cols-4 gap-2 max-w-xs mx-auto">
-      {#each v.cards as c (c.id)}{@render tile(c, !!c.yours)}{/each}
+      {#each v.cards as c, _k (_k)}{@render tile(c, !!c.yours)}{/each}
     </div>
     {#if v.cards.some((c: any) => c.yours)}<div class="flex justify-center mt-2">{@render legend()}</div>{/if}
     <p class="text-center text-sm mt-3">
@@ -125,7 +125,7 @@
   {:else if v.type === "worst_matchups"}
     {#if titled}<h4 class="text-sm font-semibold mb-3">What beats {them ? "them" : "you"} most</h4>{/if}
     <ul class="space-y-3">
-      {#each v.rows as c (c.id)}
+      {#each v.rows as c, _k (_k)}
         <li class="flex items-center gap-3" class:opacity-55={!c.real}>
           <div class="w-9 shrink-0">{@render tile(c)}</div>
           <div class="flex-1 min-w-0">
@@ -158,7 +158,7 @@
               <span class="stat-num shrink-0">{d.wins}–{d.losses}</span>
             </div>
             <div class="grid grid-cols-8 gap-1" data-testid="deck-compare" aria-label={d.current ? `${Your} deck now` : `${names(d.added)} instead of ${names(d.removed)}`}>
-              {#each d.cards as c (c.id)}{@render tile(c, !d.current && c.yours)}{/each}
+              {#each d.cards as c, _k (_k)}{@render tile(c, !d.current && c.yours)}{/each}
             </div>
             {#if !d.current && d.added.length <= 2}
               <p class="text-sm mt-1.5" data-testid="deck-change-text">{names(d.added)} instead of {names(d.removed)}</p>

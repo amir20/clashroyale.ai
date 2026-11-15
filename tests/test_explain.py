@@ -165,3 +165,25 @@ def test_a_battle_is_the_same_whichever_side_is_asked(model_path: Path) -> None:
     b = [model.token(c * 10) for c in (*CORE, MUSKETEER, KNIGHT, PEKKA)]
     p = explain.chance(model, a, b, (0.5, 0.2))
     assert p == pytest.approx(1 - explain.chance(model, b, a, (-0.5, -0.2)))
+
+
+def test_a_card_seen_at_two_levels_is_listed_once() -> None:
+    # Production had Valkyrie twice in "cards that beat you" (two level tokens), and the page's
+    # keyed list crashed on the repeat.
+    valk = {"id": 26000011, "name": "Valkyrie", "status": None}
+    rows = [
+        valk | {"effect": -3.1},
+        {"id": 1, "status": None, "effect": -2.0},
+        valk | {"effect": -1.2},
+    ]
+    assert [r["effect"] for r in explain._once(rows)] == [-3.1, -2.0]
+    evolved = valk | {"status": "evolution", "effect": -0.5}
+    assert len(explain._once([*rows, evolved])) == 3  # an evolution is shown as its own tile
+
+
+def test_the_model_view_never_repeats_a_card(analyzer: Analyzer, model_path: Path) -> None:
+    report = explain.report(analyzer, model_path, ME, insights.games(analyzer, ME), {})
+    assert report is not None
+    for side in ("strong", "weak"):
+        shown = [(c["id"], c.get("status")) for c in report[side]]
+        assert len(shown) == len(set(shown))

@@ -61,7 +61,7 @@
     {data.family_players.toLocaleString()} players this week.
   </p>
   <ul class="space-y-3">
-    {#each data.yours as c (c.id)}
+    {#each data.yours as c, _k (_k)}
       {@const v = verdict(c)}
       <li class="flex items-center gap-3">
         <div class="w-10 shrink-0"><CardTile card={c} /></div>
@@ -82,9 +82,9 @@
     <ul class="space-y-3 max-w-md">
       {#each data.candidates as c, i (i)}
         <li class="flex items-center gap-2">
-          {#each c.out as x (x.id)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
+          {#each c.out as x, _k (_k)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
           <span class="text-primary" aria-hidden="true">→</span>
-          {#each c.in as x (x.id)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
+          {#each c.in as x, _k (_k)}<div class="w-10 shrink-0"><CardTile card={x} /></div>{/each}
           <span class="text-xs opacity-70 tabular-nums ml-auto text-right">{per100(c.gain)} {c.baseline === "core" ? "vs others with your core" : "vs yours"}<br />{c.players} players{#if c.model}<br /><span class={c.model.gain >= 0 ? "text-success" : "text-error"}>model {c.model.gain > 0 ? "+" : ""}{c.model.gain.toFixed(1)}</span>{/if}</span>
         </li>
       {/each}
@@ -92,7 +92,7 @@
   {/if}
 {:else if id === "best_cards"}
   <ul class="space-y-3">
-    {#each data.cards as c (c.id)}
+    {#each data.cards as c, _k (_k)}
       <li class="flex items-center gap-3">
         <div class="w-10 shrink-0"><CardTile card={c} /></div>
         <div class="flex-1 min-w-0">
@@ -106,12 +106,12 @@
 {:else if id === "nemesis"}
   <h4 class="text-sm font-semibold mb-2 text-error">Your problem cards</h4>
   <div class="grid grid-cols-5 gap-2 max-w-lg">
-    {#each data.worst as c (c.id)}<CardTile card={c} sub={`won ${c.wins} of ${c.games}`} />{/each}
+    {#each data.worst as c, _k (_k)}<CardTile card={c} sub={`won ${c.wins} of ${c.games}`} />{/each}
   </div>
   {#if data.best.length}
     <h4 class="text-sm font-semibold mt-5 mb-2 text-success">Free wins</h4>
     <div class="grid grid-cols-5 gap-2 max-w-lg">
-      {#each data.best as c (c.id)}<CardTile card={c} sub={`won ${c.wins} of ${c.games}`} />{/each}
+      {#each data.best as c, _k (_k)}<CardTile card={c} sub={`won ${c.wins} of ${c.games}`} />{/each}
     </div>
   {/if}
 {:else if id === "best_deck"}
@@ -126,7 +126,7 @@
           <span>{d.wins}–{d.losses} · won {pct(d.win_rate)} {#if d.current}<span class="badge badge-accent badge-xs ml-1">playing now</span>{/if}</span>
           <span class="tabular-nums opacity-70 whitespace-nowrap">{d.net_trophies > 0 ? "+" : ""}{d.net_trophies} 🏆</span>
         </div>
-        <div class="grid grid-cols-8 gap-1 max-w-xl">{#each d.cards as c (c.id)}<CardTile card={c} dim={!d.current && c.yours} />{/each}</div>
+        <div class="grid grid-cols-8 gap-1 max-w-xl">{#each d.cards as c, _k (_k)}<CardTile card={c} dim={!d.current && c.yours} />{/each}</div>
         <div class="text-xs opacity-70 mt-1">{sureness(d.games)}</div>
       </li>
     {/each}

@@ -187,6 +187,19 @@ def _card(cards: dict[int, dict[str, Any]], model: Model, t: int) -> dict[str, A
     return insights._played_as(cards[v // 10], v % 10)
 
 
+def _once(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each card once, as it's shown (the same card at different levels is one tile): the first
+    row wins, which in a sorted list is the strongest effect."""
+    seen: set[tuple[Any, Any]] = set()
+    out = []
+    for r in rows:
+        key = (r["id"], r.get("status"))
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
 def deck_view(
     model: Model, f: Field, mine: list[int], cards: dict[int, dict[str, Any]]
 ) -> dict[str, Any]:
@@ -219,8 +232,8 @@ def deck_view(
     return {
         "win": round(p, 3),
         "cards": rows,
-        "strong": [r for r in against[:SHOWN] if r["effect"] > 0],
-        "weak": [r for r in against[::-1][:SHOWN] if r["effect"] < 0],
+        "strong": [r for r in _once(against)[:SHOWN] if r["effect"] > 0],
+        "weak": [r for r in _once(against[::-1])[:SHOWN] if r["effect"] < 0],
         "synergy": [r for r in pairs[:SHOWN] if r["effect"] > 0],
         "clash": [r for r in pairs[::-1][:1] if r["effect"] < 0],
         "field": {"decks": len(f.decks), "near": f.near},

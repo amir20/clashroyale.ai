@@ -24,7 +24,7 @@
 
 {#snippet chips(rows: ModelView["strong"], tone: string)}
   <div class="grid grid-cols-3 gap-2">
-    {#each rows as c (c.id * 10 + (c.status ? 1 : 0))}
+    {#each rows as c, i (i)}
       <div class="text-center">
         <div class="w-12 mx-auto">{@render tile(c)}</div>
         <div class="stat-num text-sm mt-1 {tone}">{per100(c.effect)}</div>
@@ -43,7 +43,7 @@
   <div>
     <h3 class="text-sm font-semibold mb-2">What each card adds <span class="font-normal text-base-content/60">(wins per 100 games vs an average card)</span></h3>
     <ul class="grid gap-1.5" data-testid="model-cards">
-      {#each model.cards as c (c.id)}
+      {#each model.cards as c, i (i)}
         <li class="grid grid-cols-[2rem_1fr_auto] items-center gap-2.5">
           <div class="w-8">{@render tile(c)}</div>
           <div class="min-w-0">

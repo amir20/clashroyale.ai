@@ -187,6 +187,8 @@ def create_app(
             target = (dist / path).resolve()
             if path and target.is_file() and target.is_relative_to(dist.resolve()):
                 return FileResponse(target)
-            return FileResponse(dist / "index.html")
+            # Always check for a new page: a cached one keeps running old code against the
+            # new API. The scripts it loads have hashed names, so those cache forever.
+            return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
