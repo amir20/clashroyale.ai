@@ -15,6 +15,7 @@ from crai.analysis import insights, visuals
 from crai.analysis.analytics import Analyzer
 from crai.coach import agent, prompts, voice
 from crai.coach.agent import _finished_text
+from crai.coach.chats import ChatLog
 from crai.coach.tools import player_tools
 from crai.config import Settings
 from crai.web import create_app, loading
@@ -480,3 +481,35 @@ def test_loading_shows_who_it_is_before_the_report(db_path: Path) -> None:
     assert player["name"] == "me" and "trophies" in player and len(player["deck"]) == 8
     assert player["name"] in found[0]["message"]
     assert out.index(found[0]) < len(out) - 1  # before the report
+
+
+def test_every_custom_question_is_saved_with_its_tool_calls(db_path: Path) -> None:
+    with client(db_path, ai, "k") as c:
+        c.post(
+            f"/api/players/{ME[1:]}/ask",
+            json={"question": "Optimize my deck", "history": [{"role": "user", "content": "hi"}]},
+        )
+    log = ChatLog(db_path.with_name("app.db"))
+    (row,) = log.recent(ME)
+    assert row["question"] == "Optimize my deck"
+    assert row["outcome"] == "answer"
+    assert row["reply"] == "Your deck. Tragic."
+    chat = log.get(row["id"])
+    assert chat is not None
+    assert chat["history"] == [{"role": "user", "content": "hi"}]
+    roles = [m["role"] for m in chat["transcript"]]
+    assert roles == ["user", "user", "assistant", "tool"]  # no system prompt
+    assert chat["transcript"][2]["tool_calls"][0]["function"]["name"] == "get_overview"
+    assert "wins" in chat["transcript"][3]["content"]
+
+
+def test_failed_questions_are_saved_too(db_path: Path) -> None:
+    down = lambda _: httpx.Response(500)  # noqa: E731
+    with client(db_path, down, "k") as c:
+        c.post(f"/api/players/{ME[1:]}/ask", json={"question": "Optimize my deck"})
+    log = ChatLog(db_path.with_name("app.db"))
+    (row,) = log.recent(failed=True)
+    assert row["outcome"] == "error"
+    chat = log.get(row["id"])
+    assert chat is not None
+    assert "HTTPStatusError" in chat["final"]["exception"]

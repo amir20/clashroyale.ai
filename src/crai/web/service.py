@@ -16,6 +16,7 @@ import httpx
 from crai.analysis import insights, visuals
 from crai.analysis.analytics import DEFAULT_SINCE_DAYS, Analyzer
 from crai.coach import voice
+from crai.coach.chats import ChatLog
 from crai.collect.client import ClashClient
 from crai.config import Settings
 from crai.ml import explain
@@ -110,6 +111,7 @@ class Service:
         )
         self.lock = asyncio.Lock()  # one writer and one analytics load at a time
         self.usage = Usage(settings.db_path.with_name("app.db"))
+        self.chats = ChatLog(settings.db_path.with_name("app.db"))
         self.fetched_at: dict[str, float] = {}
         self.loads = RateLimiter(LOADS_PER_MINUTE, 60)
         self.warming: asyncio.Future[None] | None = None  # the startup warm-up, while it runs

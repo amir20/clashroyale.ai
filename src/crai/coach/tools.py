@@ -14,6 +14,7 @@ from crai.analysis import insights, visuals
 from crai.analysis.analytics import DEFAULT_FILTERS, Analyzer, records
 from crai.analysis.insights import near_filters
 from crai.coach import prompts
+from crai.coach.chats import ChatLog
 from crai.config import Settings
 
 
@@ -24,6 +25,7 @@ class CoachContext(Protocol):
     transport: httpx.AsyncBaseTransport | None
     analyzer: Analyzer
     lock: asyncio.Lock
+    chats: ChatLog
 
 
 ART_KEYS = frozenset({"icon", "evo_icon", "hero_icon", "copy_url"})

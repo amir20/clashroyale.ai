@@ -90,17 +90,43 @@ def _only_swaps(visuals: list[dict[str, Any]]) -> bool:
 async def ask_coach(
     svc: CoachContext, tag: str, question: str, left: int, history: list[Turn]
 ) -> AsyncIterator[dict[str, Any]]:
-    """Answer a custom question. Every path ends in an `answer` or `error` event."""
+    """Answer a custom question. Every path ends in an `answer` or `error` event.
+
+    The whole exchange is saved to `svc.chats`, however it ends, so a bad answer can be read
+    back with `crai chats`.
+    """
+    chat: dict[str, Any] = {
+        "tag": tag,
+        "question": question,
+        "history": [t.model_dump() for t in history],
+        "transcript": [],
+        "model": svc.settings.openrouter_model,
+    }
+    started = time.monotonic()
     try:
-        async for event in _ask_coach(svc, tag, question, left, history):
+        async for event in _ask_coach(svc, tag, question, left, history, chat):
+            if event["type"] in {"answer", "error"}:
+                chat["final"] = event
             yield event
-    except Exception:
+    except Exception as e:
         log.exception("custom question failed for %s", tag)
-        yield {"type": "error", "message": "My brain glitched. Try asking that again."}
+        error = {"type": "error", "message": "My brain glitched. Try asking that again."}
+        chat["final"] = error | {"exception": repr(e)}
+        yield error
+    finally:
+        chat["cost_usd"] = chat.pop("spent", {}).get("cost_usd")
+        chat["seconds"] = round(time.monotonic() - started, 2)
+        chat["transcript"] = [m for m in chat["transcript"] if m.get("role") != "system"]
+        svc.chats.save(chat)
 
 
 async def _ask_coach(
-    svc: CoachContext, tag: str, question: str, left: int, history: list[Turn]
+    svc: CoachContext,
+    tag: str,
+    question: str,
+    left: int,
+    history: list[Turn],
+    chat: dict[str, Any],
 ) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "status", "message": "Rook is thinking…"}
     tools = player_tools(svc, tag)
@@ -114,6 +140,8 @@ async def _ask_coach(
         *[t.model_dump() for t in history],
         {"role": "user", "content": question},
     ]
+    chat["transcript"] = messages  # filled as the loop runs; saved without the system prompt
+    chat["spent"] = spent
     headers = {"Authorization": f"Bearer {svc.settings.openrouter_key}"}
     async with httpx.AsyncClient(timeout=60, transport=svc.transport) as http:
         evidence: list[str] = []
