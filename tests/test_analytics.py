@@ -108,3 +108,17 @@ def test_default_window_is_last_7_days(analyzer: Analyzer, db_path: Path) -> Non
     assert analyzer.decks(Filters(since_days=0)).height == 402  # 0 = all time
     assert Filters.of(None, None).since_days == 7
     assert Filters.of(None, 0).since_days == 0
+
+
+def test_only_the_latest_big_slice_is_kept(analyzer: Analyzer) -> None:
+    calls: list[str] = []
+
+    def slice_for(key: str) -> list[str]:
+        calls.append(key)
+        return [key]
+
+    first = analyzer._latest_cached("a", lambda: slice_for("a"))
+    assert analyzer._latest_cached("a", lambda: slice_for("a")) is first  # one scan per report
+    analyzer._latest_cached("b", lambda: slice_for("b"))
+    analyzer._latest_cached("a", lambda: slice_for("a"))  # "a" was dropped for "b"
+    assert calls == ["a", "b", "a"]

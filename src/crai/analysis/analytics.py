@@ -303,6 +303,7 @@ class Analyzer:
         self._cache: dict[Hashable, Any] = {}
         self._field: dict[Hashable, tuple[float, Any]] = {}  # see _field_cached
         self._refreshing: set[Hashable] = set()
+        self._latest: tuple[int, Hashable, Any] | None = None  # see _latest_cached
         self._base_df: pl.DataFrame | None = None
         self._covered = 0  # the snapshot rowid _base_df reaches
         self._seeds: frozenset[str] = frozenset()
@@ -452,6 +453,21 @@ class Analyzer:
                 self._cache.clear()
             self._cache[key] = fn()
         return self._cache[key]
+
+    def _latest_cached[T](self, key: Hashable, fn: Callable[[], T]) -> T:
+        """Memoize only the most recent key, for the current table.
+
+        For big slices of the table, such as the decks at one player's trophies: every step of
+        that player's report reuses one copy instead of scanning every deck again, and memory
+        never holds more than one slice.
+        """
+        table = id(self._base())
+        hit = self._latest
+        if hit is not None and hit[0] == table and hit[1] == key:
+            return hit[2]
+        value = fn()
+        self._latest = (table, key, value)
+        return value
 
     def _field_cached[T](
         self, key: Hashable, fn: Callable[[], T], fits: Callable[[T], bool] | None = None
