@@ -106,10 +106,14 @@
   }
 
   /** Show the chat, optionally asking something on the player's behalf. */
-  async function openChat(question?: string, id?: string) {
+  async function openChat(question?: string, id?: string, context?: { label: string; id?: string }[]) {
     view = "chat";
     await tick();
     if (question) chat?.ask(question, id);
+    else {
+      if (context?.length) chat?.offer(context);
+      if (matchMedia("(pointer: fine)").matches) chat?.focus(); // a phone keyboard would hide the chips
+    }
   }
 
   /** Load a report. Without `as`, the tag is the viewer's own. */
@@ -273,7 +277,7 @@
   {#if report && o}
     {#key report}
       <div class:hidden={view !== "story"}>
-        <Story {report} {them} active={view === "story"} onCard={tappable} onGoal={(label, id) => openChat(label, id)} onAsk={() => openChat()} onReset={reset} onPlayer={visit} onBack={back} />
+        <Story {report} {them} active={view === "story"} onCard={tappable} onGoal={(label, id) => openChat(label, id)} onAsk={(context) => openChat(undefined, undefined, context)} onReset={reset} onPlayer={visit} onBack={back} />
       </div>
       <div class="fixed inset-0 z-10 bg-base-100 overflow-y-auto" class:hidden={view !== "chat"} data-testid="chat">
         <div class="mx-auto max-w-2xl px-4">

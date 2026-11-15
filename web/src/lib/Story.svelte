@@ -25,8 +25,8 @@
     them?: boolean;
     active: boolean;
     onCard?: (card: Card) => void;
-    onGoal: (label: string, id: string) => void;
-    onAsk: () => void;
+    onGoal: (label: string, id?: string) => void;
+    onAsk: (context?: Ask[]) => void;
     onReset: () => void;
     onPlayer: (tag: string) => void;
     onBack?: () => void;
@@ -76,6 +76,36 @@
   const goalArt = (id: string): Card | undefined =>
     id === "nemesis" ? s.worst?.rows?.[0] : id === "replace_card" ? s.replace?.weakest ?? undefined : undefined;
   const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+  // Questions about the card on screen, so the chat is one tap away from anywhere in the story.
+  // An `id` is a built-in question: free, and answered without the AI.
+  type Ask = { label: string; id?: string };
+  const canAsk = $derived(!them);
+  function asksFor(id: string): Ask[] {
+    const worst = s.worst?.rows?.[0]?.name;
+    const weak = s.replace?.weakest?.name;
+    const swap = s.replace?.candidates?.[0];
+    const swapIn = swap?.in?.map((c: Card) => c.name).join(" + ");
+    const swapOut = swap?.out?.map((c: Card) => c.name).join(" + ");
+    const star = o.deck.find((c) => c.status) ?? o.deck[0];
+    const all: Record<string, Ask[]> = {
+      you: [{ label: "Why do I keep losing?", id: "why_losing" }, { label: "What's my best deck?", id: "best_deck" }],
+      wow: [{ label: "Which of my cards do I play better than other people?", id: "best_cards" }, { label: "What should I change first?" }],
+      deck: [{ label: "Which card should I replace?", id: "replace_card" }, ...(star ? [{ label: `What pairs best with ${star.name}?` }] : [])],
+      model: [{ label: "Which card should I replace?", id: "replace_card" }, { label: "Find me a proven deck with my win condition" }],
+      battles: [{ label: "Which cards beat me the most?", id: "nemesis" }, { label: "Why do I keep losing?", id: "why_losing" }],
+      trend: [{ label: "Why do I keep losing?", id: "why_losing" }, { label: "How do I get back on track?" }],
+      close: [{ label: "How do I win more close games?" }, { label: "Which cards beat me the most?", id: "nemesis" }],
+      worst: worst ? [{ label: `How do I beat ${worst}?` }, { label: `What card should I add to stop ${worst}?` }] : [{ label: "Which cards beat me the most?", id: "nemesis" }],
+      elixir: [{ label: "Is my deck too heavy?" }, { label: "Which swap would make my deck cheaper?" }],
+      try: [
+        ...(swapIn && swapOut ? [{ label: `Is ${swapIn} really better than ${swapOut}?` }] : []),
+        ...(weak ? [{ label: `What else could replace ${weak}?` }] : [{ label: "Which card should I replace?", id: "replace_card" }]),
+      ],
+    };
+    // Without the AI, only the built-in questions can be answered.
+    return (all[id] ?? []).filter((a) => a.id || report.ai_enabled);
+  }
   const evolved = $derived(o.deck.filter((c) => c.status));
 
   const WIDE = "(min-width: 1024px)";
@@ -101,6 +131,21 @@
     goals: "Next steps",
   };
   const sections = $derived(Array.from({ length: Math.ceil(slides.length / 2) }, (_, i) => slides.slice(i * 2, i * 2 + 2)));
+
+  // On a wide screen, the card in the middle of the screen sets what the chat chips ask about.
+  let inView = $state("you");
+  $effect(() => {
+    if (!wide) return;
+    const seen = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) if (e.isIntersecting) inView = (e.target as HTMLElement).dataset.card ?? inView;
+      },
+      { rootMargin: "-45% 0px -45% 0px" },
+    );
+    const watch = () => document.querySelectorAll<HTMLElement>("[data-card]").forEach((el) => seen.observe(el));
+    requestAnimationFrame(watch);
+    return () => seen.disconnect();
+  });
 
   let how = $state(false); // the "how Rook predicts" sheet
   const per100 = (x: number) => `${x > 0 ? "+" : ""}${x.toFixed(1)}`;
@@ -405,13 +450,26 @@
               {/each}
             </div>
             {#if report.ai_enabled}
-              <button class="btn btn-ghost font-medium cursor-pointer" onclick={onAsk}>Ask something else</button>
+              <button class="mx-auto text-sm text-base-content/55 underline-offset-4 hover:text-base-content hover:underline cursor-pointer" onclick={() => onAsk()} data-testid="ask-else">or ask something else</button>
             {/if}
             <p class="text-[11px] text-base-content/40 text-center">
               This material is unofficial and is not endorsed by Supercell. For more information see
               <a class="underline" href="https://www.supercell.com/fan-content-policy" target="_blank" rel="noreferrer">Supercell's Fan Content Policy</a>.
             </p>
           {/if}
+{/snippet}
+
+
+{#snippet dock(id: string)}
+  <!-- The chat, one tap away: "Ask Rook" opens it, the chips ask about what's on screen. -->
+  <div class="-mx-5 flex gap-2 overflow-x-auto px-5 pb-0.5 [scrollbar-width:none]" data-testid="ask-dock">
+    <button class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-primary/15 px-3.5 py-2 text-sm font-semibold text-primary transition active:scale-95" onclick={() => onAsk(asksFor(id))} data-testid="ask-rook">
+      <Icon name="chat" class="h-4 w-4" />Ask Rook
+    </button>
+    {#each asksFor(id) as a (a.label)}
+      <button class="shrink-0 cursor-pointer whitespace-nowrap rounded-full bg-base-200 px-3.5 py-2 text-sm text-base-content/80 transition hover:bg-base-300 active:scale-95" onclick={() => onGoal(a.label, a.id)}>{a.label}</button>
+    {/each}
+  </div>
 {/snippet}
 
 {#if how && report.model}
@@ -428,11 +486,16 @@
             <button class="btn btn-ghost btn-sm font-medium cursor-pointer" onclick={() => document.getElementById(`section-${i}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{sectionNames[group[0]]}</button>
           {/each}
         </nav>
-        {#if them}
-          <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onBack} data-testid="back">← Back</button>
-        {:else}
-          <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onReset}>Not you?</button>
-        {/if}
+        <div class="flex items-center gap-1">
+          {#if canAsk}
+            <button class="btn btn-primary btn-sm font-semibold cursor-pointer" onclick={() => onAsk(asksFor(inView))} data-testid="ask-rook-header"><Icon name="chat" class="h-4 w-4" />Ask Rook</button>
+          {/if}
+          {#if them}
+            <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onBack} data-testid="back">← Back</button>
+          {:else}
+            <button class="btn btn-ghost btn-sm font-medium cursor-pointer text-base-content/70" onclick={onReset}>Not you?</button>
+          {/if}
+        </div>
       </div>
     </header>
     <div class="mx-auto max-w-6xl px-8">
@@ -444,6 +507,11 @@
         </section>
       {/each}
     </div>
+    {#if canAsk && inView !== "goals"}
+      <div class="sticky bottom-0 bg-gradient-to-t from-base-100 from-60% to-transparent pt-6 pb-5">
+        <div class="mx-auto max-w-6xl px-8">{@render dock(inView)}</div>
+      </div>
+    {/if}
   </div>
 {:else}
 <div class="fixed inset-0 z-20 bg-base-100 flex flex-col" in:fly={{ y: 700, duration: 420, easing: cubicOut }} data-testid="story">
@@ -471,6 +539,9 @@
       {/key}
     </div>
 
+    {#if canAsk && current !== "goals"}
+      <div class="mt-3">{@render dock(current)}</div>
+    {/if}
     {#if !last}
       <div class="grid grid-cols-[auto_1fr] gap-2 mt-3">
         <button class="btn btn-ghost cursor-pointer disabled:opacity-0" disabled={index === 0} aria-label="Back" onclick={() => go(index - 1)}>←</button>

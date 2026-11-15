@@ -21,6 +21,7 @@
     chevron: "M6 9l6 6 6-6",
     copy: "M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1zM5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1",
     stop: "M7 7h10v10H7z",
+    chat: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z",
   } as const;
   export type IconName = keyof typeof PATHS;
 </script>

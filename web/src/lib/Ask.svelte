@@ -63,7 +63,13 @@
   const digging = ["Digging through your battles…", "Doing the math so you don't have to…", "Checking the receipts…"];
   const mood = $derived<Mood>(busy ? "thinking" : turns.at(-1)?.failed ? "oops" : turns.length ? "smug" : "idle");
   const outOfQuestions = $derived(!report.dev && left === 0);
-  const options = $derived([...(outOfQuestions ? [] : suggested), ...builtIn].slice(0, 4));
+  // Suggestions first, then the built-in questions, each label once (a card's context can offer
+  // a built-in question too).
+  const options = $derived(
+    [...(outOfQuestions ? suggested.filter((o) => o.id) : suggested), ...builtIn]
+      .filter((o, i, all) => all.findIndex((x) => x.label.toLowerCase() === o.label.toLowerCase()) === i)
+      .slice(0, 4),
+  );
   const totalCost = $derived(turns.reduce((sum, t) => sum + (t.usage?.cost_usd ?? 0), 0) + suggestCost);
   const usd = (x: number) => `$${x.toFixed(5)}`;
   const usageLine = (u: Usage) =>
@@ -238,6 +244,19 @@
   export function ask(q: string, id?: string) {
     if (id) preset(id, q);
     else custom(q);
+  }
+
+  /** Questions about what they were looking at, first among the suggestions. */
+  export function offer(context: Option[]) {
+    if (busy) return;
+    const fresh = context.filter((c) => !turns.some((t) => t.q.toLowerCase() === c.label.toLowerCase()));
+    const labels = new Set(fresh.map((c) => c.label.toLowerCase()));
+    suggested = [...fresh, ...suggested.filter((o) => !labels.has(o.label.toLowerCase()))];
+  }
+
+  /** Put the cursor in the box, ready to type. */
+  export function focus() {
+    box?.focus({ preventScroll: true });
   }
 
   function pick(o: Option) {
