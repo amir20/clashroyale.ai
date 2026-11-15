@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { cleanTag, loadPlayer, type Card, type LoadEvent, type LoadingPlayer, type Report } from "./lib/api";
+  import { cleanTag, loadPlayer, type Card, type LoadEvent, type LoadingPlayer, type LoadStep, type Report } from "./lib/api";
   import Ask from "./lib/Ask.svelte";
   import CardSheet from "./lib/CardSheet.svelte";
   import Rook, { type Mood } from "./lib/Rook.svelte";
@@ -11,6 +11,12 @@
   let input = $state("");
   let status = $state("");
   let progress = $state(0);
+  let steps = $state<LoadStep[]>([]); // finished loading steps, newest last
+  let loadStarted = 0;
+  let now = $state(0);
+  let clock: ReturnType<typeof setInterval> | undefined;
+  const loadSeconds = $derived(Math.max(0, (now - loadStarted) / 1000));
+  const fmtSecs = (s: number) => (s < 0.001 ? "<1 ms" : s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(1)}s`);
   let who = $state<LoadingPlayer | null>(null); // the player being loaded, once known
   // Path of Legends leagues, by number.
   const LEAGUES = ["Challenger I", "Challenger II", "Challenger III", "Master I", "Master II", "Master III", "Champion", "Grand Champion", "Royal Champion", "Ultimate Champion"];
@@ -55,13 +61,17 @@
   }
 
   async function onEvent(e: LoadEvent) {
-    if (e.type === "status") {
+    if (e.type === "step") {
+      steps = [...steps, e];
+    } else if (e.type === "status") {
       status = e.message;
       if (e.player) who = e.player;
       if (e.progress) progress = e.progress;
     } else if (e.type === "error") {
+      clearInterval(clock);
       fail(e.message);
     } else {
+      clearInterval(clock);
       report = e.report;
       view = "story";
       phase = "report";
@@ -91,6 +101,10 @@
     progress = 3;
     who = null;
     status = "Waking up…";
+    steps = [];
+    loadStarted = now = performance.now();
+    clearInterval(clock);
+    clock = setInterval(() => (now = performance.now()), 100);
     phase = "loading";
     stop = loadPlayer(cleaned, onEvent, them);
   }
@@ -142,13 +156,17 @@
 
 <main class="sky min-h-svh">
   <section class="sticky top-0 h-svh flex flex-col items-center justify-center px-6 text-center" class:hero-recede={phase === "report"}>
-    <Rook {mood} size={phase === "loading" ? 200 : 170} />
+    <Rook {mood} size={phase === "loading" ? (who ? 110 : 200) : 170} />
     <h1 class="text-5xl mt-2">Rook</h1>
     <p class="mt-3 max-w-xs min-h-14 text-lg leading-snug" class:text-error={!!error} aria-live="polite">{heroLine}</p>
 
     {#if phase === "loading"}
       <div class="w-full max-w-sm mt-5 pop">
         <progress class="progress progress-primary w-full h-3" value={progress} max="100"></progress>
+        <div class="mt-1.5 flex justify-between text-[11px] text-base-content/50 tabular-nums" data-testid="load-timer">
+          <span>{steps.length} {steps.length === 1 ? "step" : "steps"} done</span>
+          <span class="font-mono">{loadSeconds.toFixed(1)}s</span>
+        </div>
         {#if who}
           <!-- Who's being loaded: something to look at while the report is built. -->
           <div class="panel mt-4 p-4 text-left pop" data-testid="loading-player">
@@ -184,6 +202,19 @@
           </div>
         {:else}
           <p class="text-sm opacity-60 mt-2 dots">#{tag}</p>
+        {/if}
+        {#if steps.length}
+          <!-- What's done so far: each step with its time and how much data it went through. -->
+          <ol class="mt-4 space-y-1.5 text-left text-xs" data-testid="load-steps">
+            {#if steps.length > 4}<li class="text-base-content/40 pl-5">+{steps.length - 4} earlier</li>{/if}
+            {#each steps.slice(-4) as s (s.step + s.seconds)}
+              <li class="pop flex items-baseline gap-2">
+                <span class="w-3 shrink-0 text-success">✓</span>
+                <span class="min-w-0 flex-1 truncate text-base-content/85">{s.label}{#if s.detail}<span class="text-base-content/50">{` · ${s.detail}`}</span>{/if}</span>
+                <span class="shrink-0 font-mono tabular-nums {s.seconds >= 5 ? 'text-warning' : 'text-base-content/45'}">{fmtSecs(s.seconds)}</span>
+              </li>
+            {/each}
+          </ol>
         {/if}
       </div>
     {:else if phase === "landing"}

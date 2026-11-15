@@ -48,6 +48,9 @@ h1, .game-shadow { text-shadow: 0 3px 0 rgb(0 0 0 / 0.45); }
 .panel { background: var(--color-base-200); border: 1px solid color-mix(in oklab, var(--color-base-content) 9%, transparent); border-radius: var(--radius-box); }
 /* The chat box shows focus by its background, not a second ring around the field. */
 .composer:focus, .composer:focus-visible { outline: none; }
+/* A blinking cursor at the end of a reply that's still being written. */
+.caret { display: inline-block; width: 0.5em; height: 1em; margin-left: 2px; vertical-align: -0.12em; border-radius: 2px; background: var(--color-primary); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
 /* What Rook says: a clean quote, not a bubble. */
 .says { border-left: 2px solid var(--color-primary); padding-left: 0.875rem; line-height: 1.55; }
 

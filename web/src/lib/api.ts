@@ -129,8 +129,12 @@ export type LoadingPlayer = {
   rank: number | null;
   deck: { name: string | null; icon: string | null }[]; // from their newest battle
 };
+/** A finished loading step: how long it took and how much data it went through. */
+export type LoadStep = { type: "step"; step: string; label: string; seconds: number; detail: string };
+
 export type LoadEvent =
   | { type: "status"; step: string; message: string; progress?: number; known?: boolean; player?: LoadingPlayer | null }
+  | LoadStep
   | { type: "ready"; report: Report }
   | { type: "error"; code?: string; message: string };
 
@@ -142,7 +146,7 @@ export function loadPlayer(tag: string, onEvent: (e: LoadEvent) => void, them = 
   let finished = false;
   source.onmessage = (m) => {
     const event = JSON.parse(m.data) as LoadEvent;
-    if (event.type !== "status") {
+    if (event.type !== "status" && event.type !== "step") {
       finished = true;
       source.close();
     }
@@ -170,6 +174,7 @@ export type Step =
 export type AskEvent =
   | { type: "status"; message: string }
   | Step
+  | { type: "delta"; round: number; text: string }
   | { type: "answer"; text: string; left: number; evidence: string[]; visuals: any[]; usage?: Usage; ref?: string }
   | { type: "error"; message: string };
 
@@ -203,8 +208,10 @@ export async function askRook(
   question: string,
   history: ChatTurn[],
   onEvent: (e: AskEvent) => void,
+  signal?: AbortSignal,
 ) {
   const res = await fetch(`/api/players/${encodeURIComponent(tag)}/ask`, {
+    signal,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, history }),

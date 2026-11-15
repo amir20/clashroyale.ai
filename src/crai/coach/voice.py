@@ -532,6 +532,57 @@ REPORT_STEPS = {
     "replace": (92, "Picking a card worth swapping…"),
     "surprises": (94, "Looking for things you didn't know…"),
 }
+# Finished steps on the loading screen: a short name, and what it went through.
+STEP_NAMES = {
+    "lookup": "Looked up the tag",
+    "fetch": "Got the battle log",
+    "wake": "Waited for Rook to wake up",
+    "wait": "Waited for another report",
+    "store": "Saved new battles",
+    "data": "Loaded everyone's battles",
+    "games": "Read the games",
+    "overview": "Added up the record",
+    "similar": "Found players with similar decks",
+    "trend": "Checked the trend",
+    "close": "Checked close games",
+    "worst": "Found the cards that beat this deck",
+    "elixir": "Compared elixir cost",
+    "replace": "Compared each card with decks like it",
+    "surprises": "Looked for hidden patterns",
+    "model": "Ran the deck model",
+    "cards": "Loaded the card list",
+}
+
+
+def step_detail(name: str, notes: dict[str, Any]) -> str:
+    """What a finished loading step went through, in a few words: "1.2M decks"."""
+    rows, players = notes.get("rows"), notes.get("players")
+    if name == "fetch" and "battles" in notes:
+        return f"{notes['battles']} battles"
+    if name == "store" and "new" in notes:
+        return f"{notes['new']} new"
+    if name == "data" and rows is not None:
+        return f"{_compact(rows)} decks in memory"
+    if name in {"similar", "replace"} and rows is not None:
+        who = f" from {_compact(players)} players" if players else ""
+        return f"{_compact(rows)} decks{who}"
+    if name == "cards" and rows is not None:
+        return f"{rows} cards"
+    if "games" in notes:
+        return f"{notes['games']} games"
+    if name == "surprises" and "found" in notes:
+        return f"{notes['found']} found"
+    return ""
+
+
+def _compact(n: int) -> str:
+    """1234567 -> "1.2M", 45210 -> "45.2K", 812 -> "812"."""
+    for size, unit in ((1_000_000, "M"), (1_000, "K")):
+        if n >= size:
+            return f"{n / size:.1f}".removesuffix(".0") + unit
+    return f"{n:,}"
+
+
 SCOUT_STEPS = REPORT_STEPS | {
     "games": (78, "Reading their games…"),
     "overview": (80, "Adding up their record…"),

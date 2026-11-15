@@ -246,27 +246,40 @@ class Service:
         self.wants_refresh = False
         self.analyzer.refresh()
 
-    def report(self, tag: str, on_step: Callable[[str], None] | None = None) -> dict[str, Any]:
-        """The whole report. `on_step` hears each section's name as it starts."""
-        a, laps = self.analyzer, Laps(on_step)
-        with laps.lap("data"):
+    def report(
+        self,
+        tag: str,
+        on_step: Callable[[str], None] | None = None,
+        on_done: Callable[[str, float, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """The whole report. `on_step` hears each section's name as it starts; `on_done` hears
+        how long it took and how much data it went through."""
+        a, laps = self.analyzer, Laps(on_step, on_done)
+        with laps.lap("data") as note:
             self.fresh()  # its own lap, so the cost of new battles shows separately
-        with laps.lap("games"):
+            note["rows"] = a.decks().height
+        with laps.lap("games") as note:
             items = insights.games(a, tag)
-        with laps.lap("overview"):
+            note["games"] = len(items)
+        with laps.lap("overview") as note:
             overview = insights.overview(a, tag, items)
             patterns = insights.wins_and_losses(items)
             battles = insights.recent_battles(a, items)
-        with laps.lap("similar"):
+            note["games"] = len(items)
+        with laps.lap("similar") as note:
             similar = insights.similar_battles(a, tag, items) if items else None
+            if similar:
+                note |= {"rows": similar["battles"], "players": similar["players"]}
         story = self.story(tag, items, laps)
-        with laps.lap("model"):
+        with laps.lap("model") as note:
             model = self.model(tag, items, story["replace"])
+            note["found"] = bool(model)
         story["lines"]["pick"] = (
             voice.model_pick(model["pick"], model["field"]["where"]) if model else None
         )
-        with laps.lap("cards"):
+        with laps.lap("cards") as note:
             cards = insights.playable_cards(a)
+            note["rows"] = len(cards)
         log.info("report %s in %.2fs (%s)", tag, laps.total, laps)
         return {
             "overview": overview,
@@ -306,18 +319,27 @@ class Service:
         def usable(view: dict[str, Any]) -> dict[str, Any] | None:
             return None if "error" in view else view
 
-        with laps.lap("trend"):
+        with laps.lap("trend") as note:
             trend = usable(visuals.trend_view(a, items))
-        with laps.lap("close"):
+            note["games"] = len(items)
+        with laps.lap("close") as note:
             close = usable(visuals.close_games_view(items))
-        with laps.lap("worst"):
+            note["games"] = len(items)
+        with laps.lap("worst") as note:
             worst = usable(visuals.worst_matchups_view(a, items))
-        with laps.lap("elixir"):
+            note["games"] = len(items)
+        with laps.lap("elixir") as note:
             elixir = usable(visuals.elixir_view(a, items))
-        with laps.lap("replace"):
+            note["games"] = len(items)
+        with laps.lap("replace") as note:
             replace = insights.replace_card(a, tag, items)
-        with laps.lap("surprises"):
-            found = insights.surprises(a, tag, items)
+            note |= {
+                "rows": replace.get("family_decks", 0),
+                "players": replace.get("family_players", 0),
+            }
+        with laps.lap("surprises") as note:
+            found = insights.surprises(a, tag, items, laps)
+            note["found"] = len(found)
         return {
             "surprises": [x | voice.surprise(x) for x in found],
             "trend": trend,

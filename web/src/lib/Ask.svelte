@@ -27,6 +27,8 @@
     note?: string;
     noteSent?: boolean;
     showSteps?: boolean;
+    draft?: string; // the reply as it streams in
+    copied?: boolean;
   };
   type Option = { label: string; id?: string };
 
@@ -43,6 +45,8 @@
   let now = $state(performance.now());
   let key = 0;
   let suggestRun = 0;
+  let controller = $state<AbortController>();
+  let box = $state<HTMLTextAreaElement>();
   const offered = new Set<string>(); // every suggestion shown so far, so they don't come back
 
   // One clock for the running timer; it only ticks while Rook is working.
@@ -161,24 +165,60 @@
     if (q.length < 3 || busy || outOfQuestions) return;
     const earlier = history();
     const k = await begin(q);
+    controller = new AbortController();
+    const turn = () => turns.find((t) => t.key === k);
     try {
       await askRook(tag, q, earlier, (ev) => {
         if (ev.type === "status") update(k, { status: ev.message });
-        else if (ev.type === "step") update(k, { steps: [...(turns.find((t) => t.key === k)?.steps ?? []), ev] });
-        else if (ev.type === "answer") {
-          finish(k, { line: ev.text, usage: ev.usage, evidence: ev.evidence, visuals: ev.visuals, ref: ev.ref });
+        else if (ev.type === "delta") update(k, { draft: (turn()?.draft ?? "") + ev.text, status: "Writing…" });
+        else if (ev.type === "step") {
+          // Text written before a lookup was the model thinking out loud, not the answer.
+          const thinking = ev.kind === "model" && ev.looks_up.length > 0;
+          update(k, { steps: [...(turn()?.steps ?? []), ev], ...(thinking ? { draft: undefined } : {}) });
+        } else if (ev.type === "answer") {
+          finish(k, { line: ev.text, draft: undefined, usage: ev.usage, evidence: ev.evidence, visuals: ev.visuals, ref: ev.ref });
           left = ev.left;
-        } else finish(k, { line: ev.message, failed: true });
-      });
+        } else finish(k, { line: ev.message, draft: undefined, failed: true });
+      }, controller.signal);
     } catch {
-      finish(k, { line: "I lost the connection. Ask me again.", failed: true });
+      if (controller.signal.aborted) finish(k, { line: turn()?.draft || "Stopped.", draft: undefined, failed: !turn()?.draft });
+      else finish(k, { line: "I lost the connection. Ask me again.", draft: undefined, failed: true });
     }
+    controller = undefined;
     // Never leave a question spinning: if the stream ended without an answer, say so.
     if (turns.find((t) => t.key === k)?.status) {
       finish(k, { line: "I lost my train of thought. Ask me again.", failed: true });
     }
     busy = false;
     suggestNext();
+  }
+
+  function stop() {
+    controller?.abort();
+  }
+
+  async function copy(t: Turn) {
+    try {
+      await navigator.clipboard.writeText(t.line ?? "");
+      update(t.key, { copied: true });
+      setTimeout(() => update(t.key, { copied: false }), 1500);
+    } catch {
+      // Clipboard blocked: nothing to do.
+    }
+  }
+
+  /** The box grows with what's typed, up to a few lines. */
+  function grow() {
+    if (!box) return;
+    box.style.height = "auto";
+    box.style.height = `${Math.min(box.scrollHeight, 140)}px`;
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      box?.form?.requestSubmit();
+    }
   }
 
   function rate(t: Turn, rating: 1 | -1) {
@@ -210,6 +250,7 @@
     const q = draft.trim();
     if (q.length < 3) return;
     draft = "";
+    requestAnimationFrame(grow);
     custom(q);
   }
 </script>
@@ -241,12 +282,15 @@
       {#each turns as t (t.key)}
         <article id={`turn-${t.key}`} class="scroll-mt-20 space-y-3">
           <div class="flex justify-end">
-            <p class="max-w-[85%] rounded-3xl rounded-br-lg bg-primary px-4 py-2.5 text-[15px] font-medium leading-snug text-primary-content">{t.q}</p>
+            <p class="max-w-[85%] whitespace-pre-wrap rounded-3xl bg-base-300 px-4 py-2.5 text-[15px] leading-snug">{t.q}</p>
           </div>
 
-          <div class="flex items-start gap-2.5">
-            <div class="grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-full bg-base-200"><Rook mood={t.status ? "thinking" : t.failed ? "oops" : "idle"} size={30} /></div>
-            <div class="min-w-0 flex-1 space-y-3">
+          <div class="space-y-3">
+            <div class="flex items-center gap-2">
+              <div class="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-full bg-base-200"><Rook mood={t.status ? "thinking" : t.failed ? "oops" : "idle"} size={26} /></div>
+              <span class="text-sm font-semibold">Rook</span>
+            </div>
+            <div class="min-w-0 space-y-3">
               {#if t.status || t.steps.length}
                 <!-- What Rook is doing, live; folded away once there's an answer. -->
                 {@const open = !!t.status || !!t.showSteps}
@@ -282,16 +326,22 @@
                 </div>
               {/if}
 
+              {#if t.status && t.draft}
+                <p class="whitespace-pre-wrap text-[16px] leading-relaxed" data-testid="streaming">{t.draft}<span class="caret"></span></p>
+              {/if}
               {#if !t.status}
-                <div class="rounded-3xl rounded-tl-lg bg-base-200 px-4 py-3 text-[15px] leading-relaxed {t.failed ? 'text-error' : ''}" data-testid="reply">{t.line}</div>
+                <p class="whitespace-pre-wrap text-[16px] leading-relaxed {t.failed ? 'text-error' : ''}" data-testid="reply">{t.line}</p>
                 {#if t.id && t.data}<div class="rounded-2xl bg-base-200/60 p-4"><Answer id={t.id} data={t.data} /></div>{/if}
                 {#each t.visuals ?? [] as v, i (i)}<div class="rounded-2xl bg-base-200/60 p-4"><Visual visual={v} {onCard} /></div>{/each}
 
-                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
-                  {#if t.evidence?.length}
-                    <p class="min-w-0 flex-1 text-xs text-base-content/55" data-testid="evidence">Based on: {t.evidence.join(" · ")}</p>
-                  {:else}
-                    <span class="flex-1"></span>
+                {#if t.evidence?.length}
+                  <p class="text-xs text-base-content/55" data-testid="evidence">Based on: {t.evidence.join(" · ")}</p>
+                {/if}
+                <div class="-ml-2 flex items-center gap-0.5">
+                  {#if !t.failed}
+                    <button class="grid h-8 w-8 cursor-pointer place-items-center rounded-full text-base-content/45 transition hover:bg-base-200 hover:text-base-content" aria-label="Copy answer" onclick={() => copy(t)}>
+                      <Icon name={t.copied ? "check" : "copy"} class="h-4 w-4" />
+                    </button>
                   {/if}
                   {#if t.ref && !t.failed}
                     <div class="flex items-center gap-0.5" data-testid="rating">
@@ -340,12 +390,18 @@
 
   <form class="sticky bottom-0 -mx-4 mt-6 bg-gradient-to-t from-base-100 from-70% to-transparent px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-4" onsubmit={submit}>
     {#if report.ai_enabled}
-      <div class="flex items-center gap-2 rounded-full bg-base-200 py-1.5 pl-5 pr-1.5 transition focus-within:bg-base-300">
+      <div class="flex items-end gap-2 rounded-[26px] bg-base-200 py-1.5 pl-5 pr-1.5 transition focus-within:bg-base-300">
         <label class="sr-only" for="ask">Ask your own question</label>
-        <input id="ask" class="composer min-w-0 flex-1 bg-transparent py-1.5 text-base placeholder:text-base-content/45 disabled:cursor-not-allowed" maxlength="300" autocomplete="off" placeholder={outOfQuestions ? "That's all for today" : "Ask Rook about your deck"} bind:value={draft} disabled={busy || outOfQuestions} />
-        <button class="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full bg-primary text-primary-content transition active:scale-90 disabled:cursor-not-allowed disabled:bg-base-content/10 disabled:text-base-content/35" aria-label="Ask" disabled={busy || outOfQuestions || draft.trim().length < 3}>
-          {#if busy}<span class="loading loading-spinner loading-sm"></span>{:else}<Icon name="send" class="h-5 w-5" />{/if}
-        </button>
+        <textarea id="ask" rows="1" bind:this={box} class="composer min-w-0 flex-1 resize-none bg-transparent py-2 text-base leading-6 placeholder:text-base-content/45 disabled:cursor-not-allowed" maxlength="300" autocomplete="off" placeholder={outOfQuestions ? "That's all for today" : "Ask Rook about your deck"} bind:value={draft} oninput={grow} onkeydown={onKey} disabled={outOfQuestions}></textarea>
+        {#if busy && controller}
+          <button type="button" class="grid h-10 w-10 shrink-0 cursor-pointer place-items-center self-end rounded-full bg-base-content text-base-100 transition active:scale-90" aria-label="Stop" onclick={stop}>
+            <Icon name="stop" class="h-4 w-4 fill-current" />
+          </button>
+        {:else}
+          <button class="grid h-10 w-10 shrink-0 cursor-pointer place-items-center self-end rounded-full bg-primary text-primary-content transition active:scale-90 disabled:cursor-not-allowed disabled:bg-base-content/10 disabled:text-base-content/35" aria-label="Ask" disabled={busy || outOfQuestions || draft.trim().length < 3}>
+            {#if busy}<span class="loading loading-spinner loading-sm"></span>{:else}<Icon name="send" class="h-5 w-5" />{/if}
+          </button>
+        {/if}
       </div>
       {#if report.dev}
         <p class="mt-1.5 px-2 text-center font-mono text-[11px] text-accent" data-testid="dev-total">dev mode · no limits · session AI cost {usd(totalCost)}</p>

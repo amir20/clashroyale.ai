@@ -54,7 +54,25 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
     async def emit(event: dict[str, Any]) -> None:
         await queue.put(event)
 
-    laps = Laps()
+    loop = asyncio.get_running_loop()
+
+    def done(name: str, seconds: float, notes: dict[str, Any]) -> None:
+        """Tell the page a step finished: how long it took and how much it went through.
+        Called from the report's thread too, so it goes through the loop."""
+        if "." in name or name not in voice.STEP_NAMES:
+            return  # sub-steps are for the log only
+        if name in {"wait", "wake"} and seconds < 0.1:
+            return  # didn't have to wait
+        event = {
+            "type": "step",
+            "step": name,
+            "label": voice.STEP_NAMES[name],
+            "seconds": round(seconds, 2),
+            "detail": voice.step_detail(name, notes),
+        }
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    laps = Laps(on_end=done)
     outcome = "cancelled"  # until it finishes one way or another
 
     async def wake() -> None:
@@ -138,8 +156,9 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
                     async with svc.client() as c:
                         return await asyncio.gather(c.player(tag), c.battlelog(tag))
 
-                with laps.lap("fetch"):
+                with laps.lap("fetch") as note:
                     profile, battles = await with_heartbeat(fetch(), emit, "fetch", 0, lines)
+                    note["battles"] = len(battles)
                 if profile is None:
                     outcome = "not found"
                     await emit(
@@ -172,8 +191,8 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
                 with laps.lap("wait"):
                     await svc.lock.acquire()
                 try:
-                    with laps.lap("store"):
-                        await with_heartbeat(
+                    with laps.lap("store") as note:
+                        note["new"] = await with_heartbeat(
                             asyncio.to_thread(svc.store, profile, battles, tag),
                             emit,
                             "store",
@@ -208,7 +227,6 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
             )
             with laps.lap("wait"):
                 await svc.lock.acquire()
-            loop = asyncio.get_running_loop()
 
             def on_step(name: str) -> None:  # runs in the report's thread
                 steps = voice.SCOUT_STEPS if them else voice.REPORT_STEPS
@@ -226,7 +244,7 @@ async def load_player(svc: Service, raw_tag: str, them: bool = False) -> AsyncIt
                 with laps.lap("analyze"):
                     # Each section says what it's doing, so no filler lines in between.
                     report = await with_heartbeat(
-                        asyncio.to_thread(svc.report, tag, on_step), emit, "analyze", 4, ()
+                        asyncio.to_thread(svc.report, tag, on_step, done), emit, "analyze", 4, ()
                     )
             finally:
                 svc.lock.release()

@@ -26,6 +26,7 @@ from crai.analysis.analytics import (
     variants,
 )
 from crai.collect.client import normalize_tag
+from crai.timing import Laps
 
 type Game = dict[str, Any]
 
@@ -1636,18 +1637,25 @@ def evolution_gap(a: Analyzer, tag: str, items: list[Game]) -> dict[str, Any] | 
     }
 
 
-def surprises(a: Analyzer, tag: str, items: list[Game]) -> list[dict[str, Any]]:
+def surprises(
+    a: Analyzer, tag: str, items: list[Game], laps: Laps | None = None
+) -> list[dict[str, Any]]:
     """Up to four things about their games they couldn't see in the game, most striking first.
 
-    Each one is only included when the games prove it.
+    Each one is only included when the games prove it. With `laps`, each check is timed on its
+    own (as `surprises.<check>`), so a slow one shows up in the log.
     """
     tag = normalize_tag(tag)
     if not items:
         return []
-    found = [
-        signature_card(a, tag, items),
-        unique_deck(a, tag, items),
-        free_wins(a, items),
-        evolution_gap(a, tag, items),
-    ]
+    laps = laps or Laps()
+    found = []
+    for name, check in (
+        ("signature", lambda: signature_card(a, tag, items)),
+        ("unique", lambda: unique_deck(a, tag, items)),
+        ("free_wins", lambda: free_wins(a, items)),
+        ("evolutions", lambda: evolution_gap(a, tag, items)),
+    ):
+        with laps.lap(f"surprises.{name}"):
+            found.append(check())
     return sorted((f for f in found if f), key=lambda f: f["score"], reverse=True)[:MAX_SURPRISES]

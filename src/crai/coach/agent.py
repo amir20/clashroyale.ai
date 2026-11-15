@@ -101,6 +101,59 @@ def _ms(since: float) -> int:
     return round((time.monotonic() - since) * 1000)
 
 
+async def _call_model(
+    http: httpx.AsyncClient,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    request: dict[str, Any],
+) -> AsyncIterator[tuple[Literal["delta", "done"], Any]]:
+    """One model call, streamed: ("delta", text) as the reply is written, then ("done", body)
+    with the whole response in the usual non-streamed shape. A server that answers with
+    plain JSON instead (the tests' fake) works too."""
+    async with http.stream(
+        "POST", OPENROUTER_URL, headers=headers, json=payload | {"stream": True}
+    ) as resp:
+        request["status"] = resp.status_code
+        if resp.is_error:
+            request["error"] = (await resp.aread()).decode(errors="replace")[:4000]
+            resp.raise_for_status()
+        if not resp.headers.get("content-type", "").startswith("text/event-stream"):
+            yield "done", json.loads(await resp.aread())
+            return
+        msg: dict[str, Any] = {"role": "assistant", "content": ""}
+        calls: dict[int, dict[str, Any]] = {}
+        body: dict[str, Any] = {}
+        finish = None
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+                continue  # blank lines and ": OPENROUTER PROCESSING" keep-alives
+            chunk = json.loads(line[5:])
+            if "error" in chunk:
+                raise httpx.HTTPError(f"model stream failed: {chunk['error']}")
+            body |= {k: chunk[k] for k in ("id", "model", "provider", "usage") if chunk.get(k)}
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                finish = choice.get("finish_reason") or finish
+                if text := delta.get("content"):
+                    msg["content"] += text
+                    yield "delta", text
+                if reasoning := delta.get("reasoning"):
+                    msg["reasoning"] = msg.get("reasoning", "") + reasoning
+                for part in delta.get("tool_calls") or []:
+                    call = calls.setdefault(
+                        part.get("index", 0),
+                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                    )
+                    call["id"] = part.get("id") or call["id"]
+                    fn = part.get("function") or {}
+                    call["function"]["name"] += fn.get("name") or ""
+                    call["function"]["arguments"] += fn.get("arguments") or ""
+        if calls:
+            msg["tool_calls"] = [calls[i] for i in sorted(calls)]
+        body["choices"] = [{"message": msg, "finish_reason": finish}]
+        yield "done", body
+
+
 async def ask_coach(
     svc: CoachContext,
     tag: str,
@@ -182,17 +235,15 @@ async def _ask_coach(
                 "usage": {"include": True},
             }
             asked = time.monotonic()
-            resp = await http.post(
-                OPENROUTER_URL,
-                headers=headers,
-                json=params | {"messages": messages, "tools": schema},
-            )
-            request = {"params": params, "messages": len(messages), "status": resp.status_code}
+            request: dict[str, Any] = {"params": params, "messages": len(messages)}
             chat["requests"].append(request)
-            if resp.is_error:
-                request["error"] = resp.text[:4000]
-            resp.raise_for_status()
-            body = resp.json()
+            body: dict[str, Any] = {}
+            payload = params | {"messages": messages, "tools": schema}
+            async for kind, value in _call_model(http, headers, payload, request):
+                if kind == "delta":
+                    yield {"type": "delta", "round": attempt + 1, "text": value}
+                else:
+                    body = value
             request |= {"ms": _ms(asked), "response": body}
             choice = body["choices"][0]
             msg = choice["message"]

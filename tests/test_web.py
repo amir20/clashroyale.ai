@@ -53,6 +53,27 @@ def test_never_seen_player_reports_every_step(db_path: Path) -> None:
     assert ready["report"]["intro"]
 
 
+def test_loading_says_what_each_step_did_and_how_long_it_took(db_path: Path) -> None:
+    with client(db_path) as c:
+        out = events(c.get(f"/api/players/{ME[1:]}/load").text)
+    steps = {e["step"]: e for e in out if e["type"] == "step"}
+    assert steps["fetch"]["detail"] == "12 battles"
+    assert steps["store"]["detail"].endswith(" new")
+    assert steps["data"]["detail"].endswith("decks in memory")
+    assert steps["games"]["detail"].endswith(" games")
+    assert {"similar", "replace", "surprises", "model"} <= steps.keys()
+    assert all(e["label"] and e["seconds"] >= 0 for e in steps.values())
+    assert not any("." in name for name in steps)  # sub-steps stay in the log
+    assert out.index(steps["fetch"]) < out.index(steps["data"]) < len(out) - 1
+
+
+@pytest.mark.parametrize(
+    ("n", "shown"), [(812, "812"), (45_210, "45.2K"), (1_000_000, "1M"), (22_140_000, "22.1M")]
+)
+def test_big_counts_are_short(n: int, shown: str) -> None:
+    assert voice._compact(n) == shown
+
+
 def test_each_load_logs_where_its_time_went(
     db_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -575,3 +596,41 @@ def test_failed_questions_are_saved_too(db_path: Path) -> None:
     chat = log.get(row["id"])
     assert chat is not None
     assert "HTTPStatusError" in chat["final"]["exception"]
+
+
+def streamed(request: httpx.Request) -> httpx.Response:
+    """OpenRouter's streamed shape: a tool call split across chunks, then the reply in pieces."""
+    sent = json.loads(request.content)
+    assert sent["stream"] is True
+    if sent["messages"][-1]["role"] != "tool":
+        name = {"index": 0, "id": "c1", "function": {"name": "get_ov", "arguments": "{"}}
+        rest = {"index": 0, "function": {"name": "erview", "arguments": "}"}}
+        chunks: list[dict[str, Any]] = [
+            {"choices": [{"delta": {"tool_calls": [name]}}]},
+            {"choices": [{"delta": {"tool_calls": [rest]}, "finish_reason": "tool_calls"}]},
+        ]
+    else:
+        chunks = [
+            {"choices": [{"delta": {"content": "Your deck. "}}]},
+            {"choices": [{"delta": {"content": "Tragic."}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 50, "completion_tokens": 5, "cost": 0.001}},
+        ]
+    lines = [": OPENROUTER PROCESSING", *(f"data: {json.dumps(c)}" for c in chunks)]
+    text = "\n\n".join([*lines, "data: [DONE]"]) + "\n\n"
+    return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
+
+
+def test_replies_stream_in_as_they_are_written(db_path: Path) -> None:
+    with client(db_path, streamed, "k") as c:
+        out = events(c.post(f"/api/players/{ME[1:]}/ask", json={"question": "How am I?"}).text)
+    assert [e["text"] for e in out if e["type"] == "delta"] == ["Your deck. ", "Tragic."]
+    assert out[-1]["type"] == "answer"
+    assert out[-1]["text"] == "Your deck. Tragic."
+    tool = next(e for e in out if e["type"] == "step" and e["kind"] == "tool")
+    assert tool["name"] == "get_overview"
+    log = ChatLog(db_path.with_name("app.db"))
+    (row,) = log.recent()
+    chat = log.get(row["id"])
+    assert chat is not None
+    assert chat["cost_usd"] == pytest.approx(0.001)
+    assert chat["transcript"][-1]["content"] == "Your deck. Tragic."
