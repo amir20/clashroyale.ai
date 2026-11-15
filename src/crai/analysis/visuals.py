@@ -158,9 +158,15 @@ def swap_view(
 
 
 MAX_REPLACEMENTS = 5  # candidates judged head to head; each one is a filter over the pool
+# Games a side needs before a replacement's comparison stops widening. The closest decks to a
+# Hero Berserker deck held 189 games: a margin of ±7 per 100, so nothing was ever "better".
+MIN_REPLACEMENT_GAMES = 1000
+NEW_DECK_CHANGES = 3  # a "new deck" changes at least this many of the player's 8 cards
 
 
-def replacements(a: Analyzer, tag: str, items: list[Game], out_card: str) -> dict[str, Any]:
+def replacements(
+    a: Analyzer, tag: str, items: list[Game], out_card: str, exclude: Sequence[str] = ()
+) -> dict[str, Any]:
     """What other players with the player's other cards run in this card's slot, and how each
     one does against the card itself, head to head (the same test as `swap_view`)."""
     key = current_deck_key(items)
@@ -187,9 +193,17 @@ def replacements(a: Analyzer, tag: str, items: list[Game], out_card: str) -> dic
         .len()
         .sort("len", descending=True)
     )
-    tried = [c for c in fills["cards"].to_list() if c in cards and can_play(cards[c], slot)]
+    banned = set(a.resolve_cards(exclude))
+    tried = [
+        c
+        for c in fills["cards"].to_list()
+        if c in cards and c not in banned and can_play(cards[c], slot)
+    ]
     order = {"better": 0, "even": 1, "worse": 2, "unknown": 3}
-    judged = [(in_id, swaps.compare(out_id, in_id, slot)) for in_id in tried[:MAX_REPLACEMENTS]]
+    judged = [
+        (in_id, swaps.compare(out_id, in_id, slot, MIN_REPLACEMENT_GAMES))
+        for in_id in tried[:MAX_REPLACEMENTS]
+    ]
     judged.sort(key=lambda j: (order[j[1].verdict], -(j[1].gap or 0.0)))  # real upgrades first
     found = [
         _played_as(cards[in_id], slot)
@@ -212,8 +226,10 @@ def replacements(a: Analyzer, tag: str, items: list[Game], out_card: str) -> dic
             f"{'within the player' + chr(39) + 's trophy range' if near else 'at all trophies'}. "
             f"Each replacement is compared head to head with {cards[out_id]['name']}{form} in "
             "the same slot: `gap` is its win rate minus the card's, per game; `verdict` says "
-            "whether the gap is bigger than the margin. Only 'better' is a real upgrade. "
-            "None of these cards is in the player's deck already."
+            "whether the gap is bigger than the margin. 'better' is a proven upgrade; 'even' "
+            "means too close to call yet (not equal): if they want a change anyway, the even one "
+            "with the biggest gap and most games is the one to try. None of these cards is in "
+            "the player's deck already, and none they ruled out."
         ),
     }
 
@@ -293,12 +309,17 @@ def top_cards_view(a: Analyzer, items: list[Game] | None = None) -> dict[str, An
 
 
 def proven_decks(
-    a: Analyzer, wanted: Sequence[CardRef], limit: int = 1, f: Filters = DEFAULT_FILTERS
+    a: Analyzer,
+    wanted: Sequence[CardRef],
+    limit: int = 1,
+    f: Filters = DEFAULT_FILTERS,
+    exclude: Sequence[CardRef] = (),
 ) -> list[DeckResult]:
     """Decks winning across many players, ranked by what their sample size can vouch for."""
     decks = a.top_decks(
         f,
         include=wanted,
+        exclude=exclude,
         min_games=MIN_VISUAL_GAMES,
         min_players=MIN_DECK_PLAYERS,
         max_top3_share=MAX_TOP3_SHARE,
@@ -310,14 +331,35 @@ def proven_decks(
 
 
 def near_proven_decks(
-    a: Analyzer, wanted: Sequence[CardRef], items: list[Game] | None, limit: int = 1
+    a: Analyzer,
+    wanted: Sequence[CardRef],
+    items: list[Game] | None,
+    limit: int = 1,
+    exclude: Sequence[CardRef] = (),
+    unlike: Sequence[int] = (),
 ) -> tuple[list[DeckResult], str]:
-    """Proven decks at this player's trophies, or across everyone if none are proven there."""
+    """Proven decks at this player's trophies, or across everyone if none are proven there.
+
+    `unlike` is the player's deck when they want a new one: decks keeping more than
+    8 - NEW_DECK_CHANGES of its cards are skipped.
+    """
     f, scope = _where(items)
-    decks = proven_decks(a, wanted, limit, f) if f is not DEFAULT_FILTERS else []
-    if decks:
-        return decks, scope
-    return proven_decks(a, wanted, limit), ALL_PLAYERS
+    tries = [(f, scope)] if f is not DEFAULT_FILTERS else []
+    tries.append((DEFAULT_FILTERS, ALL_PLAYERS))
+    ids = {name: cid for cid, name in a.card_names().items()}
+    for where, label in tries:
+        # A new deck is picked from more candidates, since most good ones resemble theirs.
+        found = proven_decks(a, wanted, 50 if unlike else limit, where, exclude)
+        if unlike:
+            keep = set(unlike)
+            found = [
+                d
+                for d in found
+                if len({ids[n] for n in d["cards"] if n in ids} & keep) <= 8 - NEW_DECK_CHANGES
+            ]
+        if found:
+            return found[:limit], label
+    return [], ALL_PLAYERS
 
 
 def proven_for_player(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
@@ -342,12 +384,28 @@ def proven_for_player(a: Analyzer, items: list[Game]) -> dict[str, Any] | None:
     return None
 
 
-def deck_view(a: Analyzer, wanted: list[str], items: list[Game] | None = None) -> dict[str, Any]:
-    """The best proven deck containing the requested cards."""
-    decks, scope = near_proven_decks(a, wanted, items)
+def deck_view(
+    a: Analyzer,
+    wanted: list[str],
+    items: list[Game] | None = None,
+    exclude: Sequence[str] = (),
+    new: bool = False,
+) -> dict[str, Any]:
+    """The best proven deck containing the requested cards, without the excluded ones. With
+    `new`, it must change at least NEW_DECK_CHANGES of the player's current cards."""
+    mine = _ids(current_deck_key(items)) if new and items else []
+    decks, scope = near_proven_decks(a, wanted, items, exclude=exclude, unlike=mine)
     if not decks:
-        return {"error": "No deck with those cards has been won with by enough different players."}
-    return _deck_card(a, decks[0], scope, items)
+        what = "new deck (3 or more cards different from theirs)" if new else "deck"
+        return {
+            "error": f"No proven {what} with those cards"
+            + (" and without the cards they ruled out" if exclude else "")
+            + " at their trophies or across all players. Try fewer cards to keep."
+        }
+    view = _deck_card(a, decks[0], scope, items)
+    if new:
+        view["changed_cards"] = sum(1 for c in view["cards"] if not c.get("yours"))
+    return view
 
 
 def _deck_card(

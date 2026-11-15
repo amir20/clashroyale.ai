@@ -9,7 +9,7 @@ from conftest import HOG, ME, PEKKA
 from crai.analysis import insights, visuals
 from crai.analysis.analytics import Analyzer, CardNotFound, Filters
 from crai.coach import voice
-from crai.coach.tools import CoachContext, player_tools
+from crai.coach.tools import CoachContext, player_tools, tool_schema
 
 
 def game(result: str, **kw: Any) -> insights.Game:
@@ -345,3 +345,51 @@ def test_replacements_never_offer_a_card_already_in_the_deck(analyzer: Analyzer)
 def test_replacing_a_card_they_dont_run_is_an_error(analyzer: Analyzer) -> None:
     items = insights.games(analyzer, ME)
     assert "isn't in their deck" in visuals.replacements(analyzer, ME, items, "pekka")["error"]
+
+
+@pytest.fixture
+def small_decks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fixture has a handful of opponents, far fewer than a deck needs to be called proven.
+    monkeypatch.setattr(visuals, "MIN_DECK_PLAYERS", 1)
+    monkeypatch.setattr(visuals, "MIN_VISUAL_GAMES", 1)
+
+
+def test_a_new_deck_changes_at_least_three_cards(
+    analyzer: Analyzer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Asked for a new deck, Rook showed their own deck with one card swapped.
+    items = insights.games(analyzer, ME)
+    names = analyzer.card_names()
+    mine = [names[c] for c in insights._ids(insights.current_deck_key(items))]
+    others = [n for n in names.values() if n not in mine]
+    one_off = [*mine[:7], others[0]]  # their deck with one card changed: ranked first
+    new = [*mine[:5], *others[:3]]
+
+    def found(*_: Any, **__: Any) -> list[dict[str, Any]]:
+        return [
+            {"cards": d, "games": 500, "players": 50, "win_rate": 0.6, "avg_elixir": 3.5}
+            for d in (one_off, new)
+        ]
+
+    monkeypatch.setattr(visuals, "proven_decks", found)
+    view = visuals.deck_view(analyzer, [], items, new=True)
+    assert [c["name"] for c in view["cards"]] == new
+    assert view["changed_cards"] == visuals.NEW_DECK_CHANGES
+    assert len(visuals.deck_view(analyzer, [], items)["cards"]) == 8  # without `new`: the best
+
+
+@pytest.mark.usefixtures("small_decks")
+def test_cards_the_player_ruled_out_never_come_back(analyzer: Analyzer) -> None:
+    # "I can't use Mini P.E.K.K.A", and Rook kept bringing it up.
+    items = insights.games(analyzer, ME)
+    deck = visuals.deck_view(analyzer, [], items, exclude=["pekka"], new=True)
+    assert "error" in deck or PEKKA not in {c["id"] for c in deck["cards"]}
+    swaps = visuals.replacements(analyzer, ME, items, "hog", exclude=["pekka"])
+    assert PEKKA not in {r["id"] for r in swaps["replacements"]}
+
+
+def test_ruling_out_cards_and_asking_for_a_new_deck_are_optional() -> None:
+    params = {t["function"]["name"]: t["function"]["parameters"] for t in tool_schema()}
+    assert params["show_deck"]["required"] == []
+    assert params["replacements_for_card"]["required"] == ["card"]
+    assert params["show_swap"]["required"] == ["out_card", "in_card"]

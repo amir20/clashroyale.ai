@@ -662,13 +662,16 @@ class SwapField:
             self._all = self._pool(near=False)
         yield self._all, False
 
-    def compare(self, out_id: int, in_id: int, slot: int) -> HeadToHead:
+    def compare(
+        self, out_id: int, in_id: int, slot: int, min_games: int = MIN_SWAP_GAMES
+    ) -> HeadToHead:
         """Both cards judged in the slot the leaving card fills.
 
         Decks as close to theirs as the games allow: their exact deck with only this card
         changed, then one more card changed, and so on. A deck that drops a card usually has to
         cover for it (losing Musketeer means losing air defense), so the closer the decks, the
-        more the gap is about this swap alone.
+        more the gap is about this swap alone. `min_games` is how many games each side needs
+        before it stops widening: more games, a smaller margin, a verdict more often.
         """
         has_out, has_in = (pl.col("cards").list.contains(c) for c in (out_id, in_id))
         top = len(self._others)
@@ -681,7 +684,7 @@ class SwapField:
                 p = one.filter(pl.col("shared") >= needed)
                 sides = (p.filter("is_out"), p.filter("is_in"))
                 fewest = min(s.height for s in sides)
-                enough = fewest >= MIN_SWAP_GAMES
+                enough = fewest >= min_games
                 # Without enough anywhere, show the closest it got (the most games a side).
                 if chosen is None or enough or fewest > min(s.height for s in chosen[1]):
                     chosen = (p, sides, near, needed)

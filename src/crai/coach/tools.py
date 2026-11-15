@@ -84,7 +84,9 @@ def player_tools(svc: CoachContext, tag: str) -> dict[str, Callable[[dict[str, A
         "show_card_ranking": lambda args: visuals.ranking_view(
             a, args["card"], args["kind"], items()
         ),
-        "show_deck": lambda args: visuals.deck_view(a, args["cards"], items()),
+        "show_deck": lambda args: visuals.deck_view(
+            a, args.get("cards", []), items(), args.get("exclude", []), args.get("new", False)
+        ),
         "show_top_cards": lambda _: visuals.top_cards_view(a, items()),
         "how_to_win_more": lambda _: insights.game_plan(a, tag, items()),
         "how_many_games_rook_tracks": lambda _: insights.field_size(a, items()),
@@ -98,7 +100,9 @@ def player_tools(svc: CoachContext, tag: str) -> dict[str, Callable[[dict[str, A
         "best_partners_for_card": lambda args: near_ranking(args["card"], "pairs"),
         "counters_for_card": lambda args: near_ranking(args["card"], "counters"),
         "top_decks_with_cards": lambda args: top_decks(args.get("cards", [])),
-        "replacements_for_card": lambda args: visuals.replacements(a, tag, items(), args["card"]),
+        "replacements_for_card": lambda args: visuals.replacements(
+            a, tag, items(), args["card"], args.get("exclude", [])
+        ),
     }
 
 
@@ -109,21 +113,33 @@ TOOL_PARAMS: dict[str, dict[str, Any]] = {
         "card": {"type": "string"},
         "kind": {"type": "string", "enum": ["pairs", "counters"]},
     },
-    "show_deck": {"cards": {"type": "array", "items": {"type": "string"}}},
+    "show_deck": {
+        "cards": {"type": "array", "items": {"type": "string"}},
+        "exclude": {"type": "array", "items": {"type": "string"}},
+        "new": {"type": "boolean"},
+    },
     "my_record_against_card": {"card": {"type": "string"}},
     "my_record_with_card": {"card": {"type": "string"}},
     "best_partners_for_card": {"card": {"type": "string"}},
     "counters_for_card": {"card": {"type": "string"}},
     "top_decks_with_cards": {"cards": {"type": "array", "items": {"type": "string"}}},
-    "replacements_for_card": {"card": {"type": "string"}},
+    "replacements_for_card": {
+        "card": {"type": "string"},
+        "exclude": {"type": "array", "items": {"type": "string"}},
+    },
 }
+
+
+# Cards the player ruled out, and "make it a new deck": only when the player asks for them.
+OPTIONAL_PARAMS = frozenset({"exclude", "new", "cards"})
 
 
 def tool_schema() -> list[dict[str, Any]]:
     schema = []
     for name, (_, description) in prompts.tool_prompts().items():
         props = TOOL_PARAMS.get(name, {})
-        parameters = {"type": "object", "properties": props, "required": list(props)}
+        required = [k for k in props if k not in OPTIONAL_PARAMS]
+        parameters = {"type": "object", "properties": props, "required": required}
         function = {"name": name, "description": description, "parameters": parameters}
         schema.append({"type": "function", "function": function})
     return schema
