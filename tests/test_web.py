@@ -390,6 +390,30 @@ def test_show_tools_become_visuals_built_from_data(
     assert "http" not in sent[-1]["content"]  # image links go to the page, not the model
 
 
+def test_a_replacement_lookup_shows_the_deck_with_the_swap(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "Can you swap out Queen?" answered in words only: the new deck should be on screen.
+    deck = {"type": "deck", "cards": [], "games": 2177, "players": 638, "copy_url": "x"}
+    monkeypatch.setattr(
+        visuals, "replacements", lambda *_: {"replacements": [], "deck": deck, "scope": "s"}
+    )
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["messages"][-1]["role"] == "tool":
+            reply: dict[str, Any] = {"role": "assistant", "content": "Try Firecracker."}
+        else:
+            args = json.dumps({"card": "hog"})
+            call = {"id": "1", "function": {"name": "replacements_for_card", "arguments": args}}
+            reply = {"role": "assistant", "tool_calls": [call]}
+        return httpx.Response(200, json={"choices": [{"message": reply}]})
+
+    with client(db_path, model, "k") as c:
+        out = events(c.post(f"/api/players/{ME[1:]}/ask", json={"question": "Swap hog"}).text)
+    assert out[-1]["visuals"] == [deck]
+
+
 def test_a_failed_show_tool_draws_nothing(db_path: Path) -> None:
     def model(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)

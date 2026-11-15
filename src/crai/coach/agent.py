@@ -320,14 +320,23 @@ async def _ask_coach(
                 failed = isinstance(result, dict) and "error" in result
                 if (fact := voice.evidence(name, result)) and fact not in evidence:
                     evidence.append(fact)
-                is_visual = isinstance(result, dict) and "type" in result and not failed
+                # A show_ tool's result is the visual; another tool may bring one as `deck`
+                # (replacements_for_card: their deck with the best swap, ready to copy).
+                shown = (
+                    result
+                    if name.startswith("show_")
+                    else result.get("deck")
+                    if isinstance(result, dict)
+                    else None
+                )
                 if (
-                    name.startswith("show_")
-                    and is_visual
-                    and result not in visuals
+                    not failed
+                    and isinstance(shown, dict)
+                    and "type" in shown
+                    and shown not in visuals
                     and len(visuals) < MAX_VISUALS
                 ):
-                    visuals.append(result)
+                    visuals.append(shown)
                 yield {
                     "type": "step",
                     "kind": "tool",

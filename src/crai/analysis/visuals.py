@@ -218,9 +218,30 @@ def replacements(
         for in_id, h2h in judged
     ]
     form = f" (played as {STATUS[slot]})" if slot else ""
+    # Their deck with the best replacement in, ready to copy: the answer shows it.
+    best = next(((i, h) for i, h in judged if h.verdict in {"better", "even"}), None)
+    deck = None
+    if best:
+        in_id, h2h = best
+        ids = [in_id if c == out_id else c for c in mine]
+        shown = compared(cards, ids, set(mine))
+        deck = {
+            "type": "deck",
+            "cards": shown,
+            "games": h2h.in_games,
+            "players": h2h.in_players,
+            "win_rate": h2h.in_rate,
+            "avg_elixir": round(sum(c["elixir"] or 0 for c in shown) / len(shown), 2),
+            "copy_url": COPY_DECK_URL.format(deck=";".join(str(c["id"]) for c in shown)),
+            "scope": f"Decks like theirs with {cards[in_id]['name']} in place of "
+            f"{cards[out_id]['name']}, "
+            + ("at their trophies" if near else "at all trophies")
+            + ", last 7 days",
+        }
     return {
         "card": _played_as(cards[out_id], slot),
         "replacements": found,
+        "deck": deck,
         "scope": (
             f"Other players' decks sharing this player's other cards, "
             f"{'within the player' + chr(39) + 's trophy range' if near else 'at all trophies'}. "
@@ -229,7 +250,9 @@ def replacements(
             "whether the gap is bigger than the margin. 'better' is a proven upgrade; 'even' "
             "means too close to call yet (not equal): if they want a change anyway, the even one "
             "with the biggest gap and most games is the one to try. None of these cards is in "
-            "the player's deck already, and none they ruled out."
+            "the player's deck already, and none they ruled out. `deck` is their deck with the "
+            "first better-or-even replacement in; it's shown to them with a copy button, so "
+            "recommend that one."
         ),
     }
 

@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from typing import Any, cast
 
+import polars as pl
 import pytest
 from conftest import HOG, ME, PEKKA
 
@@ -393,3 +394,27 @@ def test_ruling_out_cards_and_asking_for_a_new_deck_are_optional() -> None:
     assert params["show_deck"]["required"] == []
     assert params["replacements_for_card"]["required"] == ["card"]
     assert params["show_swap"]["required"] == ["out_card", "in_card"]
+
+
+def test_a_replacement_comes_with_the_new_deck_to_copy(
+    analyzer: Analyzer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "Swap out Queen" got only words: the answer should show the deck with the swap in.
+    upgrade = insights.HeadToHead(
+        out_games=1200, in_games=2177, out_players=300, in_players=638, out_rate=0.5,
+        in_rate=0.73, gap=0.23, margin=0.04, verdict="better", decks=3400, near=True,
+        needed=7, exact=True, also=None, sides=(pl.DataFrame(), pl.DataFrame()),
+    )  # fmt: skip
+    monkeypatch.setattr(insights.SwapField, "compare", lambda *_: upgrade)
+    items = insights.games(analyzer, ME)
+    view = visuals.replacements(analyzer, ME, items, "hog")
+    best = next(r for r in view["replacements"] if r["verdict"] in {"better", "even"})
+    deck = view["deck"]
+    ids = [c["id"] for c in deck["cards"]]
+    mine = set(insights._ids(insights.current_deck_key(items)))
+    assert deck["type"] == "deck"
+    assert len(ids) == 8
+    assert best["id"] in ids
+    assert HOG not in ids
+    assert set(ids) - {best["id"]} <= mine
+    assert str(best["id"]) in deck["copy_url"]
