@@ -11,12 +11,34 @@
   let input = $state("");
   let status = $state("");
   let progress = $state(0);
-  let steps = $state<(LoadStep & { n: number })[]>([]); // finished loading steps, newest last
+  let steps = $state<LoadStep[]>([]); // finished loading steps, newest last
+  // The loading screen shows four stages, not every step: the server reports ~17 steps, most
+  // taking milliseconds, which said a lot without saying what Rook was doing.
+  const STAGES = [
+    { label: "Get the latest battles", steps: ["lookup", "fetch", "found", "wake", "wait", "store"], show: ["fetch"] },
+    { label: "Find players with decks like this", steps: ["analyze", "data", "games", "overview", "similar"], show: ["similar"] },
+    { label: "Test swaps for each card", steps: ["trend", "close", "worst", "elixir", "replace"], show: ["replace"] },
+    { label: "Look for hidden patterns", steps: ["surprises", "model", "cards"], show: ["surprises"] },
+  ];
+  const stageOf = (step: string) => STAGES.findIndex((s) => s.steps.includes(step));
+  let stage = $state(0); // the stage running now
+  let stageStarted = $state<number[]>([]); // when each stage started (performance.now())
+  let stageEnded = $state<number[]>([]);
+  /** Stages only move forward; skipped ones (no fetch when the battles are fresh) take 0s. */
+  function enterStage(i: number) {
+    if (i <= stage) return;
+    const t = performance.now();
+    for (let j = stage; j < i; j++) stageEnded[j] = t;
+    for (let j = stage + 1; j <= i; j++) stageStarted[j] = t;
+    stage = i;
+  }
+  const stageDetail = (i: number) =>
+    steps.filter((s) => STAGES[i].show.includes(s.step) && s.detail).map((s) => s.detail).join(" · ");
   let loadStarted = 0;
   let now = $state(0);
   let clock: ReturnType<typeof setInterval> | undefined;
   const loadSeconds = $derived(Math.max(0, (now - loadStarted) / 1000));
-  const fmtSecs = (s: number) => (s < 0.001 ? "<1 ms" : s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(1)}s`);
+  const fmtSecs = (s: number) => (s < 0.1 ? "0s" : `${s.toFixed(1)}s`);
   let who = $state<LoadingPlayer | null>(null); // the player being loaded, once known
   // Path of Legends leagues, by number.
   const LEAGUES = ["Challenger I", "Challenger II", "Challenger III", "Master I", "Master II", "Master III", "Champion", "Grand Champion", "Royal Champion", "Ultimate Champion"];
@@ -62,9 +84,11 @@
 
   async function onEvent(e: LoadEvent) {
     if (e.type === "step") {
-      steps = [...steps, { ...e, n: steps.length }];
+      steps = [...steps, e];
     } else if (e.type === "status") {
       status = e.message;
+      if (e.step === "done") enterStage(STAGES.length);
+      else if (stageOf(e.step) >= 0) enterStage(stageOf(e.step));
       if (e.player) who = e.player;
       if (e.progress) progress = e.progress;
     } else if (e.type === "error") {
@@ -102,7 +126,11 @@
     who = null;
     status = "Waking up…";
     steps = [];
+    stage = 0;
+    stageStarted = [];
+    stageEnded = [];
     loadStarted = now = performance.now();
+    stageStarted[0] = loadStarted;
     clearInterval(clock);
     clock = setInterval(() => (now = performance.now()), 100);
     phase = "loading";
@@ -164,7 +192,7 @@
       <div class="w-full max-w-sm mt-5 pop">
         <progress class="progress progress-primary w-full h-3" value={progress} max="100"></progress>
         <div class="mt-1.5 flex justify-between text-[11px] text-base-content/50 tabular-nums" data-testid="load-timer">
-          <span>{steps.length} {steps.length === 1 ? "step" : "steps"} done</span>
+          <span>Step {Math.min(stage + 1, STAGES.length)} of {STAGES.length}</span>
           <span class="font-mono">{loadSeconds.toFixed(1)}s</span>
         </div>
         {#if who}
@@ -203,19 +231,26 @@
         {:else}
           <p class="text-sm opacity-60 mt-2 dots">#{tag}</p>
         {/if}
-        {#if steps.length}
-          <!-- What's done so far: each step with its time and how much data it went through. -->
-          <ol class="mt-4 space-y-1.5 text-left text-xs" data-testid="load-steps">
-            {#if steps.length > 4}<li class="text-base-content/40 pl-5">+{steps.length - 4} earlier</li>{/if}
-            {#each steps.slice(-4) as s (s.n)}
-              <li class="pop flex items-baseline gap-2">
-                <span class="w-3 shrink-0 text-success">✓</span>
-                <span class="min-w-0 flex-1 truncate text-base-content/85">{s.label}{#if s.detail}<span class="text-base-content/50">{` · ${s.detail}`}</span>{/if}</span>
-                <span class="shrink-0 font-mono tabular-nums {s.seconds >= 5 ? 'text-warning' : 'text-base-content/45'}">{fmtSecs(s.seconds)}</span>
-              </li>
-            {/each}
-          </ol>
-        {/if}
+        <!-- The four stages: what's done (with its time and how much data), what's running. -->
+        <ol class="mt-4 space-y-2 text-left text-sm" data-testid="load-steps">
+          {#each STAGES as st, i (st.label)}
+            {@const secs = ((stageEnded[i] ?? now) - (stageStarted[i] ?? now)) / 1000}
+            <li class="flex items-start gap-2.5" class:opacity-40={i > stage}>
+              <span class="mt-0.5 grid size-4 shrink-0 place-items-center">
+                {#if i < stage}<span class="text-success">✓</span>
+                {:else if i === stage}<span class="loading loading-spinner loading-xs text-primary"></span>
+                {:else}<span class="size-1.5 rounded-full bg-base-content/40"></span>{/if}
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate" class:font-semibold={i === stage}>{st.label}</span>
+                {#if i <= stage && stageDetail(i)}<span class="block truncate text-xs text-base-content/50">{stageDetail(i)}</span>{/if}
+              </span>
+              {#if i <= stage}
+                <span class="shrink-0 font-mono text-xs tabular-nums {i === stage ? 'text-base-content/70' : 'text-base-content/45'}">{fmtSecs(secs)}</span>
+              {/if}
+            </li>
+          {/each}
+        </ol>
       </div>
     {:else if phase === "landing"}
       <form class="w-full max-w-xs mt-5" class:shake={shaking} onsubmit={(e) => { e.preventDefault(); start(input); }}>
