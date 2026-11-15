@@ -14,6 +14,9 @@
   Playwright (it's already a dev dependency in `web/`) at phone width, and show it before saying
   you're done. Rook is used mostly on phones.
 - **Before committing**, run the four CI checks from AGENTS.md. Then commit on `main` and push.
-- **Production** runs in Docker on a NAS, reached through Rex; logs and CPU/memory are in
-  Dozzle. Test performance there in a throwaway container, never inside the live one. Don't
+- **Production** runs in Docker on the NAS `krazyraminfars`; logs and CPU/memory are in Dozzle.
+  Deploy with `scripts/deploy` (see `deploy/README.md`): it builds on the NAS through the docker
+  context `krazyraminfars` and restarts Rook. Use that context or `ssh krazyraminfars` for
+  anything on the NAS, not hand-copied source. Test performance there in a throwaway
+  container (`docker --context krazyraminfars run --rm ...`), never inside the live one. Don't
   restart or redeploy production without asking.

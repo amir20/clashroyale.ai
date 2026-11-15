@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Deploy Rook to the NAS (krazyraminfars) straight from this checkout.
+#
+#   scripts/deploy              build the current commit on the NAS and restart Rook
+#   scripts/deploy --dirty      same, with uncommitted changes (tagged <commit>-dirty)
+#   scripts/deploy --rollback   go back to the image that ran before the last deploy
+#   scripts/deploy --rollback <commit>   go back to that commit's image
+#   scripts/deploy --status     which commit is running, and the last log lines
+#
+# Needs the docker context and SSH host "krazyraminfars" (home network; see deploy/README.md).
+# The NAS's Docker builds the image, so only changed layers rebuild; nothing is copied by hand.
+set -euo pipefail
+
+HOST=krazyraminfars
+DIR=/volume2/docker/rook
+KEEP=5 # rook:<commit> images kept for rollback
+cd "$(git rev-parse --show-toplevel)"
+docker_nas() { docker --context "$HOST" "$@"; }
+running() { docker_nas inspect rook --format '{{index .Config.Labels "rook.commit"}}' 2>/dev/null || true; }
+
+restart() {
+  ssh "$HOST" "cat > $DIR/compose.yaml" <deploy/compose.yaml
+  ssh "$HOST" "cd $DIR && docker compose up -d --wait --wait-timeout 120"
+  echo "running $(running). Warming up (about 40 s): watching for 'warm-up done'..."
+  if docker_nas logs -f --since 1s rook 2>&1 | grep -m1 -E "warm-up (done|failed)"; then :; fi
+}
+
+case "${1:-}" in
+  --status)
+    echo "running: $(running)"
+    docker_nas logs --tail 5 rook
+    exit
+    ;;
+  --rollback)
+    docker_nas tag "rook:${2:-previous}" rook:latest
+    restart
+    exit
+    ;;
+  --dirty | "") ;;
+  *)
+    sed -n '2,10p' "$0"
+    exit 1
+    ;;
+esac
+
+commit=$(git rev-parse --short HEAD)
+if [[ -n $(git status --porcelain) ]]; then
+  [[ ${1:-} == --dirty ]] || {
+    echo "Uncommitted changes. Commit them, or pass --dirty to deploy them anyway." >&2
+    exit 1
+  }
+  commit="$commit-dirty"
+fi
+
+was=$(running)
+started=$SECONDS
+# What runs now becomes rook:previous, the default --rollback target.
+current=$(docker_nas inspect rook --format '{{.Image}}' 2>/dev/null || true)
+[[ -n $current && $was != "$commit" ]] && docker_nas tag "$current" rook:previous
+docker_nas build --label "rook.commit=$commit" -t "rook:$commit" -t rook:latest .
+echo "built rook:$commit in $((SECONDS - started)) s"
+restart
+echo "deployed $commit in $((SECONDS - started)) s (was ${was:-unknown})"
+
+# Keep the last few commit images for rollback; drop older ones and dangling layers.
+docker_nas images rook --format '{{.Tag}}' |
+  grep -vE '^(latest|previous)$' | tail -n +$((KEEP + 1)) |
+  while read -r tag; do docker_nas rmi "rook:$tag" >/dev/null || true; done
+docker_nas image prune -f >/dev/null

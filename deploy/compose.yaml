@@ -1,0 +1,49 @@
+# Rook in production, on the NAS (krazyraminfars) in /volume2/docker/rook.
+# Don't edit the copy on the NAS: scripts/deploy copies this file there on every deploy.
+# The image is built on the NAS's Docker by scripts/deploy (docker context "krazyraminfars"),
+# tagged rook:<commit> and rook:latest. Secrets stay in .env on the NAS, next to this file.
+
+x-rook: &rook
+  image: rook:latest
+  pull_policy: never # built on the NAS itself, never pulled
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - ./data:/app/data
+
+services:
+  rook:
+    <<: *rook
+    container_name: rook
+    mem_limit: 16g
+    environment:
+      - CRAI_ANALYTICS_DAYS=8
+      - CRAI_DEV=1 # no daily question limit, AI cost shown on the page
+    ports:
+      - "8787:8000"
+    labels:
+      - dev.dozzle.name=Rook
+      - dev.dozzle.url=http://ugreen-nas.tail40338f.ts.net:8787
+      - dev.dozzle.icon=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTUiIGZpbGw9IiMxMjE0MmIiLz4KICA8cGF0aCBkPSJNMzMgNSBsLTYgMTEgNyAtMyA1IC0xMCB6IiBmaWxsPSIjMzMzYjg1Ii8+CiAgPGNpcmNsZSBjeD0iMzIiIGN5PSIzMyIgcj0iMjMiIGZpbGw9IiM0YTU0YTgiLz4KICA8Y2lyY2xlIGN4PSIyMyIgY3k9IjI5IiByPSI4LjUiIGZpbGw9IiNmZmYiLz4KICA8Y2lyY2xlIGN4PSI0MSIgY3k9IjI5IiByPSI4LjUiIGZpbGw9IiNmZmYiLz4KICA8Y2lyY2xlIGN4PSIyNSIgY3k9IjMwIiByPSI0IiBmaWxsPSIjMTIxNDJiIi8+CiAgPGNpcmNsZSBjeD0iNDMiIGN5PSIzMCIgcj0iNCIgZmlsbD0iIzEyMTQyYiIvPgogIDxwYXRoIGQ9Ik0xNCAxOCBMMjkgMjIgTTUwIDE4IEwzNSAyMiIgc3Ryb2tlPSIjMTIxNDJiIiBzdHJva2Utd2lkdGg9IjMuNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHBhdGggZD0iTTI0IDM5IFEzMiAzNCA0MCAzOSBMMzIgNTQgWiIgZmlsbD0iI2ZmYzUzZCIvPgo8L3N2Zz4K
+
+  crawler:
+    <<: *rook
+    container_name: rook-crawler
+    mem_limit: 3g
+    depends_on:
+      - rook
+    healthcheck:
+      disable: true
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          echo "next crawl in 2 hours"
+          sleep 7200
+          crai crawl --top 1000 --max-players 40000 --refresh-hours 6 --tracked-refresh-hours 2
+          crai prune --days 14
+        done
+    labels:
+      - dev.dozzle.name=Rook Crawler
+      - dev.dozzle.icon=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTUiIGZpbGw9IiMxMjE0MmIiLz4KICA8cGF0aCBkPSJNMzMgNSBsLTYgMTEgNyAtMyA1IC0xMCB6IiBmaWxsPSIjMzMzYjg1Ii8+CiAgPGNpcmNsZSBjeD0iMzIiIGN5PSIzMyIgcj0iMjMiIGZpbGw9IiM0YTU0YTgiLz4KICA8Y2lyY2xlIGN4PSIyMyIgY3k9IjI5IiByPSI4LjUiIGZpbGw9IiNmZmYiLz4KICA8Y2lyY2xlIGN4PSI0MSIgY3k9IjI5IiByPSI4LjUiIGZpbGw9IiNmZmYiLz4KICA8Y2lyY2xlIGN4PSIyNSIgY3k9IjMwIiByPSI0IiBmaWxsPSIjMTIxNDJiIi8+CiAgPGNpcmNsZSBjeD0iNDMiIGN5PSIzMCIgcj0iNCIgZmlsbD0iIzEyMTQyYiIvPgogIDxwYXRoIGQ9Ik0xNCAxOCBMMjkgMjIgTTUwIDE4IEwzNSAyMiIgc3Ryb2tlPSIjMTIxNDJiIiBzdHJva2Utd2lkdGg9IjMuNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHBhdGggZD0iTTI0IDM5IFEzMiAzNCA0MCAzOSBMMzIgNTQgWiIgZmlsbD0iI2ZmYzUzZCIvPgo8L3N2Zz4K
